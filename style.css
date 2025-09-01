@@ -1,0 +1,50 @@
+/* assets/style.css — Design System + ajustes suaves de layout  */
+/* --------- Paleta (será sobrescrita via Python se extraída do logo) --------- */
+:root {
+  --primary: #2E8B57;     /* cai para o verde-padrão se não houver logo */
+  --accent:  #0EA5E9;
+  --muted:   #667085;
+  --bg:      #FFFFFF;
+  --bg2:     #F6F7F9;
+  --danger:  #D92D20;
+
+  --radius: 10px;
+  --btn-h:  2.0rem;
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+}
+
+/* container da página */
+.main .block-container { max-width: 1400px; padding-top: .6rem; }
+
+/* Logo menor (mantém layout atual) */
+.logo-box img { max-width: 44px; height: auto; border-radius: 8px; }
+
+/* Garante colunas lado a lado (sem empilhar) — mantém seu layout atual */
+[data-testid="stHorizontalBlock"] { gap: 1rem !important; flex-wrap: nowrap !important; align-items: flex-start !important; }
+
+/* Imagem à esquerda ~1/3, comandos à direita ~2/3 (mesmo do seu layout atual) */
+[data-testid="stHorizontalBlock"] > div:first-child { flex: 0 0 33% !important; min-width: 320px !important; }
+[data-testid="stHorizontalBlock"] > div:nth-child(2) { flex: 1 0 0 !important; }
+
+/* Imagem um pouco mais alta para “bater” com a coluna da direita */
+.img-fixed img {
+  width: 100% !important; height: auto !important;
+  max-height: 78vh !important; object-fit: contain !important;
+  border-radius: var(--radius); border: 1px solid #E5E7EB;
+}
+
+/* Painel direito com rolagem leve */
+.right-pane { max-height: 78vh; overflow: auto; padding-right: .5rem; }
+
+/* Botões menores e consistentes */
+div.stButton > button {
+  height: var(--btn-h); padding: 0 .6rem; border-radius: var(--radius);
+  white-space: nowrap; font-size: 0.9rem; border: 1px solid #E5E7EB;
+}
+
+/* Botões “temáticos” (se você usa classes via container) */
+.btn-primary button { background: var(--primary) !important; color: #fff !important; border: none !important; }
+.btn-ghost   button { background: #fff !important; color: #111 !important; }
+
+h1, h2, h3 { color: #111; }
+.muted { color: var(--muted); font-size: .9rem; }

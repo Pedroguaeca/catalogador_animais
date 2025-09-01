@@ -1,0 +1,81 @@
+/* ===== Layout geral ===== */
+.main .block-container {
+  max-width: 1400px;
+  padding-top: .3rem;
+  padding-bottom: .3rem;
+}
+
+/* manter colunas lado a lado e evitar quebra */
+[data-testid="stHorizontalBlock"]{
+  gap: .75rem !important;
+  flex-wrap: nowrap !important;
+  align-items: flex-start !important;
+  overflow-x: auto;
+}
+
+/* imagem ~45% | comandos ~55% */
+[data-testid="stHorizontalBlock"] > div:first-child{
+  flex: 0 0 45% !important;
+  max-width: 45% !important;
+  min-width: 420px !important;
+}
+[data-testid="stHorizontalBlock"] > div:nth-child(2){
+  flex: 0 0 55% !important;
+  max-width: 55% !important;
+}
+
+/* imagem alta para equilibrar com a coluna da direita */
+.img-fixed img{
+  width: 100% !important;
+  height: auto !important;
+  max-height: 82vh !important;
+  object-fit: contain !important;
+  border-radius: 10px;
+  border: 1px solid #e5e7eb;
+}
+
+/* painel direito sem scroll visível; tudo precisa caber */
+.right-pane{
+  max-height: 82vh;
+  overflow: hidden;
+  padding-right: .25rem;
+}
+
+/* inputs mais compactos */
+.stSlider, .stSelectbox, .stTextInput, .stRadio{
+  margin-top: .25rem;
+  margin-bottom: .25rem;
+}
+
+/* reduz o espaçamento dos expanders */
+details[data-testid="stExpander"] > summary{ padding: .35rem .5rem; }
+details[data-testid="stExpander"] div[role="group"]{
+  padding-top: .35rem;
+  padding-bottom: .35rem;
+}
+
+/* ===== Botões (tamanho padrão compacto) ===== */
+div.stButton > button{
+  height: 1.8rem;
+  padding: 0 .50rem;
+  border-radius: 9px;
+  white-space: nowrap;
+  font-size: .85rem;
+}
+
+/* ===== Linha de criar categoria (botão menor) ===== */
+.add-row div.stButton > button{
+  height: 1.4rem;
+  padding: 0 .40rem;
+  font-size: .80rem;
+  border-radius: 8px;
+  min-width: 6.5rem; /* ajuste se quiser menor */
+}
+
+/* ===== Rodapé full-width com todos os botões em uma linha ===== */
+.footer-row div.stButton > button{
+  height: 1.6rem;
+  padding: 0 .50rem;
+  font-size: .85rem;
+  border-radius: 8px;
+}

@@ -1,0 +1,190 @@
+{
+  "Cam2_pos5_Cutia": {
+    "analisado": true,
+    "labels": 1
+  },
+  "Cam2_pos5_Macuco": {
+    "analisado": false,
+    "labels": 0
+  },
+  "Cam2_pos5_Macuco (2)": {
+    "analisado": false,
+    "labels": 0
+  },
+  "Cam2_pos5_Macuco (3)": {
+    "analisado": false,
+    "labels": 0
+  },
+  "Casal Cutia_Cam2Pos3": {
+    "analisado": true,
+    "labels": 237
+  },
+  "Casal_Macuco_Cam3Pos1_": {
+    "analisado": false,
+    "labels": 0
+  },
+  "Cutia_Cam2Pos2_01a": {
+    "analisado": true,
+    "labels": 308
+  },
+  "Cutia_Cam2Pos2_01b": {
+    "analisado": false,
+    "labels": 0
+  },
+  "Cutia_Cam2Pos2_02": {
+    "analisado": false,
+    "labels": 0
+  },
+  "Cutia_Cam2Pos2_03": {
+    "analisado": false,
+    "labels": 0
+  },
+  "Cutia_Cam2Pos2_04": {
+    "analisado": false,
+    "labels": 0
+  },
+  "Cutia_Cam2Pos3_5": {
+    "analisado": false,
+    "labels": 0
+  },
+  "Cutia_Cam2Pos3_5c": {
+    "analisado": false,
+    "labels": 0
+  },
+  "Cutia_Cam2Pos3_5d": {
+    "analisado": false,
+    "labels": 0
+  },
+  "Cutia_Cam2Pos3_7": {
+    "analisado": false,
+    "labels": 0
+  },
+  "Cutia_Cam3Pos1_01": {
+    "analisado": false,
+    "labels": 0
+  },
+  "Cutia_Cam3Pos1_02": {
+    "analisado": false,
+    "labels": 0
+  },
+  "Cutia_Cam3Pos1_03": {
+    "analisado": false,
+    "labels": 0
+  },
+  "Cutia_Cam3Pos1_04": {
+    "analisado": false,
+    "labels": 0
+  },
+  "Cutia_Cam3Pos1_08": {
+    "analisado": false,
+    "labels": 0
+  },
+  "Cópia de Onça_Parda_Cam3Pos1_a": {
+    "analisado": false,
+    "labels": 0
+  },
+  "Esquilo_Cam3_Pos1": {
+    "analisado": false,
+    "labels": 0
+  },
+  "Irara_Cam3_pos2_06110083_": {
+    "analisado": false,
+    "labels": 0
+  },
+  "cam2_pos5_cutia": {
+    "analisado": false,
+    "labels": 0
+  },
+  "cam2_pos5_macuco": {
+    "analisado": false,
+    "labels": 0
+  },
+  "cam2_pos5_macuco_2": {
+    "analisado": false,
+    "labels": 0
+  },
+  "cam2_pos5_macuco_3": {
+    "analisado": false,
+    "labels": 0
+  },
+  "cam3_pos1_teiu": {
+    "analisado": true,
+    "labels": 585
+  },
+  "casal_cutia_cam2pos3": {
+    "analisado": false,
+    "labels": 0
+  },
+  "casal_macuco_cam3pos1": {
+    "analisado": false,
+    "labels": 0
+  },
+  "copia_de_onca_parda_cam3pos1_a": {
+    "analisado": true,
+    "labels": 94
+  },
+  "cutia_cam2pos2_01a": {
+    "analisado": false,
+    "labels": 0
+  },
+  "cutia_cam2pos2_01b": {
+    "analisado": false,
+    "labels": 0
+  },
+  "cutia_cam2pos2_02": {
+    "analisado": false,
+    "labels": 0
+  },
+  "cutia_cam2pos2_03": {
+    "analisado": false,
+    "labels": 0
+  },
+  "cutia_cam2pos2_04": {
+    "analisado": false,
+    "labels": 0
+  },
+  "cutia_cam2pos3_5": {
+    "analisado": false,
+    "labels": 0
+  },
+  "cutia_cam2pos3_5c": {
+    "analisado": false,
+    "labels": 0
+  },
+  "cutia_cam2pos3_5d": {
+    "analisado": false,
+    "labels": 0
+  },
+  "cutia_cam2pos3_7": {
+    "analisado": false,
+    "labels": 0
+  },
+  "cutia_cam3pos1_01": {
+    "analisado": false,
+    "labels": 0
+  },
+  "cutia_cam3pos1_02": {
+    "analisado": false,
+    "labels": 0
+  },
+  "cutia_cam3pos1_03": {
+    "analisado": false,
+    "labels": 0
+  },
+  "cutia_cam3pos1_04": {
+    "analisado": false,
+    "labels": 0
+  },
+  "cutia_cam3pos1_08": {
+    "analisado": false,
+    "labels": 0
+  },
+  "esquilo_cam3_pos1": {
+    "analisado": false,
+    "labels": 0
+  },
+  "irara_cam3_pos2_06110083": {
+    "analisado": true,
+    "labels": 112
+  }
+}

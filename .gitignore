@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+
+# Virtual env
+.venv/
+env/
+venv/
+catalogo/
+
+# macOS
+.DS_Store
+
+# Dados e modelos grandes
+frames/
+videos/
+resultados/
+dataset/images/
+dataset/labels/
+yolov8n.pt
