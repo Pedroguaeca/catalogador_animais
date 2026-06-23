@@ -202,7 +202,8 @@ def process_videos(
         wr = csv.writer(f)
         wr.writerow([
             "video", "frame", "crop", "timestamp (frame)",
-            "data", "hora", "genero", "det_conf", "cls_conf", "model_version",
+            "data", "hora", "genero", "det_conf", "cls_conf",
+            "x1", "y1", "x2", "y2", "model_version",
         ])
 
         for vpath in videos:
@@ -227,6 +228,7 @@ def process_videos(
 
                         x1, y1, x2, y2 = xyxy
                         crop_bgr = frame[y1:y2, x1:x2]
+
                         crop_path = save_crop(crop_bgr, frames_dir, base, frame_idx, genus=genus)
 
                         data_str, hora_str = guess_datetime_for_frame(vpath, frame_idx, fps)
@@ -240,6 +242,7 @@ def process_videos(
                             genus,
                             round(d_conf, 3),
                             round(c_conf, 3),
+                            x1, y1, x2, y2,
                             MODEL_VERSION,
                         ])
                         total_rows += 1

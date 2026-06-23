@@ -7,7 +7,6 @@ from typing import List, Dict
 from datetime import datetime
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
-from ultralytics import YOLO
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CONFIGURAÇÃO
@@ -20,7 +19,6 @@ LABELS_TRAIN = os.path.join(DATASET_DIR, "labels", "train")
 CLASSES_FILE = os.path.join(DATASET_DIR, "classes.txt")
 STATS_FILE = os.path.join(DATASET_DIR, "stats.json")
 UPLOAD_DIR = "videos/uploaded"
-MODEL_PATH = "yolov8n.pt"
 
 for p in [IMAGES_TRAIN, LABELS_TRAIN, UPLOAD_DIR, "assets"]:
     os.makedirs(p, exist_ok=True)
@@ -668,6 +666,240 @@ with col_title:
 
 st.divider()
 
+CSV_PATH = "resultados/catalogo_animais.csv"
+
+
+def load_csv_detections(csv_path: str) -> dict:
+    """Carrega o CSV do pipeline → {frame_abs: [{classe, det_conf, cls_conf, conf, xyxy, use}]}"""
+    import csv as csv_mod
+    result: dict = {}
+    if not os.path.exists(csv_path):
+        return result
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        for row in csv_mod.DictReader(f):
+            frame_rel = row.get("frame", "")
+            if not frame_rel:
+                continue
+            frame_abs = os.path.join(FRAMES_DIR, frame_rel)
+            if frame_abs not in result:
+                result[frame_abs] = []
+            try:
+                x1, y1, x2, y2 = float(row["x1"]), float(row["y1"]), float(row["x2"]), float(row["y2"])
+            except (KeyError, ValueError):
+                x1 = y1 = x2 = y2 = 0.0
+            cls_conf = float(row.get("cls_conf") or 0)
+            result[frame_abs].append({
+                "use": True,
+                "classe": row.get("genero", "Unknown"),
+                "det_conf": float(row.get("det_conf") or 0),
+                "cls_conf": cls_conf,
+                "conf": cls_conf,           # compatível com draw_boxes
+                "xyxy": [x1, y1, x2, y2],
+            })
+    return result
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# CARREGAR DETECÇÕES E FILTRAR CROPS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Exclui recortes (crops) da navegação — só frames completos
+image_paths = [p for p in image_paths if "/crops/" not in p and "\\crops\\" not in p]
+prefixes = video_prefixes(image_paths)
+
+csv_dets = load_csv_detections(CSV_PATH)
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # SELEÇÃO DE VÍDEO E CLASSE
-# ━━━━━━━━━━━━━━━━
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+sel_col1, sel_col2, sel_col3 = st.columns([3, 3, 2])
+
+with sel_col1:
+    new_prefix = st.selectbox(
+        "Vídeo",
+        prefixes,
+        index=prefixes.index(st.session_state.selected_prefix)
+        if st.session_state.selected_prefix in prefixes else 0,
+        label_visibility="collapsed",
+    )
+    if new_prefix != st.session_state.selected_prefix:
+        st.session_state.selected_prefix = new_prefix
+        firsts = [p for p in image_paths if base_prefix_for_frame(p) == new_prefix]
+        st.session_state.idx = image_paths.index(firsts[0]) if firsts else 0
+        st.rerun()
+
+with sel_col2:
+    classes_list = read_classes(CLASSES_FILE)
+    # Garante que gêneros do AI estejam disponíveis para anotação
+    ai_genera = sorted({d["classe"] for dets in csv_dets.values() for d in dets if d["classe"] != "Unknown"})
+    merged_classes = sorted(set(classes_list + ai_genera))
+    if merged_classes != classes_list:
+        write_classes(CLASSES_FILE, merged_classes)
+        classes_list = merged_classes
+
+    current_frame_dets = csv_dets.get(image_paths[st.session_state.idx], [])
+    ai_suggestion = current_frame_dets[0]["classe"] if current_frame_dets else (classes_list[0] if classes_list else "")
+    default_idx = classes_list.index(ai_suggestion) if ai_suggestion in classes_list else 0
+
+    selected_class = st.selectbox(
+        "Classe",
+        classes_list if classes_list else ["(sem classes — adicione em dataset/classes.txt)"],
+        index=default_idx,
+        label_visibility="collapsed",
+    )
+    st.session_state.selected_class = selected_class
+
+with sel_col3:
+    new_class_input = st.text_input("Nova classe", placeholder="ex: veado", label_visibility="collapsed")
+    if new_class_input.strip():
+        classes_list = write_classes(CLASSES_FILE, classes_list + [new_class_input.strip()])
+        st.rerun()
+
+st.divider()
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# FRAME ATUAL
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+current_prefix = st.session_state.selected_prefix
+prefix_frames = [p for p in image_paths if base_prefix_for_frame(p) == current_prefix]
+
+if not prefix_frames:
+    st.warning("Nenhum frame para este vídeo.")
+    st.stop()
+
+# Garante que idx aponta para um frame deste vídeo
+if image_paths[st.session_state.idx] not in prefix_frames:
+    st.session_state.idx = image_paths.index(prefix_frames[0])
+
+current_img_path = image_paths[st.session_state.idx]
+local_idx = prefix_frames.index(current_img_path)
+
+col_img, col_ctrl = st.columns([7, 3])
+
+with col_img:
+    img_pil = Image.open(current_img_path).convert("RGB")
+    frame_dets = csv_dets.get(current_img_path, [])
+
+    if st.session_state.show_detections and frame_dets:
+        img_display = draw_boxes(img_pil, frame_dets, show_conf=True)
+    else:
+        img_display = img_pil
+
+    st.image(img_display, use_container_width=True)
+
+    # Info do AI sob a imagem
+    if frame_dets:
+        for i, d in enumerate(frame_dets):
+            badge_color = "#34C759" if d["cls_conf"] >= 0.5 else "#FF9500" if d["cls_conf"] >= 0.3 else "#8E8E93"
+            st.markdown(
+                f'<span style="background:{badge_color};color:white;padding:3px 10px;'
+                f'border-radius:12px;font-size:0.8rem;font-weight:600;margin-right:6px;">'
+                f'AI: {d["classe"]}</span>'
+                f'<span style="font-size:0.8rem;color:#6C6C70;">'
+                f'det {d["det_conf"]:.2f} · cls {d["cls_conf"]:.2f}</span>',
+                unsafe_allow_html=True,
+            )
+    else:
+        st.caption("Nenhuma detecção do pipeline neste frame.")
+
+with col_ctrl:
+    st.markdown(f"**Frame {local_idx + 1} / {len(prefix_frames)}**")
+    st.caption(os.path.basename(current_img_path))
+
+    # Controles de detecção por frame
+    if frame_dets:
+        st.markdown("**Detecções:**")
+        for i, d in enumerate(frame_dets):
+            use = st.checkbox(
+                f"{d['classe']} ({d['cls_conf']:.2f})",
+                value=d["use"],
+                key=f"use_{st.session_state.idx}_{i}",
+            )
+            frame_dets[i]["use"] = use
+            # Override de classe por detecção
+            override = st.selectbox(
+                "Classe",
+                classes_list,
+                index=classes_list.index(d["classe"]) if d["classe"] in classes_list else 0,
+                key=f"cls_{st.session_state.idx}_{i}",
+                label_visibility="collapsed",
+            )
+            frame_dets[i]["classe"] = override
+
+    st.divider()
+
+    # Opção lote
+    with st.expander("Opções avançadas"):
+        apply_all_frames = st.checkbox(
+            "Aplicar a todos os frames do vídeo",
+            value=False,
+            help="Aplica a classe selecionada a todos os frames deste vídeo"
+        )
+        allow_force = st.checkbox(
+            "Salvar sem detecção (bbox = frame inteiro)",
+            value=False,
+        )
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# NAVEGAÇÃO E SAVE
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+st.divider()
+nav1, nav2, nav3, nav4 = st.columns(4)
+
+def go_prev():
+    if local_idx > 0:
+        st.session_state.idx = image_paths.index(prefix_frames[local_idx - 1])
+
+def go_next():
+    if local_idx < len(prefix_frames) - 1:
+        st.session_state.idx = image_paths.index(prefix_frames[local_idx + 1])
+
+def skip_video():
+    remaining = [p for p in image_paths if base_prefix_for_frame(p) not in
+                 [current_prefix] + list({base_prefix_for_frame(q) for q in image_paths[:image_paths.index(current_img_path)]})]
+    if remaining:
+        next_prefix = base_prefix_for_frame(remaining[0])
+        st.session_state.selected_prefix = next_prefix
+        st.session_state.idx = image_paths.index(remaining[0])
+
+def do_save():
+    dets_to_save = frame_dets if frame_dets else (
+        fake_fullbox_detection(current_img_path, st.session_state.selected_class) if allow_force else []
+    )
+    if not dets_to_save:
+        st.warning("Nenhuma detecção para salvar. Ative 'Salvar sem detecção' se necessário.")
+        return
+
+    if apply_all_frames:
+        for fp in prefix_frames:
+            fd = csv_dets.get(fp, fake_fullbox_detection(fp, st.session_state.selected_class))
+            for d in fd:
+                d["classe"] = st.session_state.selected_class
+            save_annotation(fp, fd)
+        st.success(f"✅ {len(prefix_frames)} frames do vídeo anotados como {st.session_state.selected_class}.")
+    else:
+        save_annotation(current_img_path, dets_to_save)
+        go_next()
+
+with nav1:
+    if st.button("← Voltar", use_container_width=True):
+        go_prev()
+        st.rerun()
+
+with nav2:
+    if st.button("Próximo →", use_container_width=True):
+        go_next()
+        st.rerun()
+
+with nav3:
+    if st.button("⏭ Pular vídeo", use_container_width=True):
+        skip_video()
+        st.rerun()
+
+with nav4:
+    if st.button("💾 Salvar & próximo", type="primary", use_container_width=True):
+        do_save()
+        st.rerun()
