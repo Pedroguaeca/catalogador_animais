@@ -1,23 +1,47 @@
-# Python
+# Python / venv
 __pycache__/
 *.pyc
 *.pyo
-*.pyd
-*.sqlite3
-
-# Virtual env
 .venv/
-env/
-venv/
-catalogo/
+.env
+
+# Anaconda/conda
+*.conda
+*.ipynb_checkpoints
+
+# Dados grandes (não versionar)
+videos/
+frames/
+dataset/images/
+dataset/labels/
+resultados/
+*.mp4
+*.AVI
+*.avi
+*.mov
+*.mkv
+
+# Imagens geradas (frames extraídos de vídeo)
+# Não usar *.jpg / *.png globais — ignoraria assets/ e outros arquivos de UI
+frames/**/*.jpg
+frames/**/*.png
+dataset/**/*.jpg
+dataset/**/*.png
+
+# Modelos de IA (baixar separadamente, podem ter vários GB)
+*.pt
+*.pth
+*.pb
+*.onnx
+*.weights
+*.h5
+*.tflite
+
+# Arquivos de trabalho temporários
+lista_frames_altaconfianca.txt
+
+# Ultralytics/YOLO runs
+runs/
 
 # macOS
 .DS_Store
-
-# Dados e modelos grandes
-frames/
-videos/
-resultados/
-dataset/images/
-dataset/labels/
-yolov8n.pt
