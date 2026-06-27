@@ -1,0 +1,61 @@
+name: Deploy → Staging
+
+on:
+  push:
+    branches: ["develop"]
+
+env:
+  AWS_REGION:    ${{ secrets.AWS_REGION }}
+  ECR_REGISTRY:  ${{ secrets.ECR_REGISTRY }}
+
+jobs:
+  deploy:
+    name: Build + Push + Deploy (staging)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar credenciais AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      - name: Login no ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build e push — pipeline
+        run: |
+          IMAGE=$ECR_REGISTRY/siab-pipeline:staging-${{ github.sha }}
+          docker build -t $IMAGE .
+          docker push $IMAGE
+          echo "PIPELINE_IMAGE=$IMAGE" >> $GITHUB_ENV
+
+      - name: Build e push — frontend
+        run: |
+          IMAGE=$ECR_REGISTRY/siab-frontend:staging-${{ github.sha }}
+          docker build -t $IMAGE ./frontend
+          docker push $IMAGE
+          echo "FRONTEND_IMAGE=$IMAGE" >> $GITHUB_ENV
+
+      - name: Deploy na EC2 de staging
+        uses: appleboy/ssh-action@v1
+        with:
+          host:     ${{ secrets.STAGING_EC2_HOST }}
+          username: ec2-user
+          key:      ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd /opt/siab
+            aws ecr get-login-password --region ${{ secrets.AWS_REGION }} \
+              | docker login --username AWS --password-stdin ${{ secrets.ECR_REGISTRY }}
+
+            # Atualiza as imagens no compose
+            export PIPELINE_IMAGE=${{ env.PIPELINE_IMAGE }}
+            export FRONTEND_IMAGE=${{ env.FRONTEND_IMAGE }}
+
+            docker compose pull
+            docker compose up -d --remove-orphans
+            docker image prune -f

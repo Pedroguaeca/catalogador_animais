@@ -1,0 +1,53 @@
+version: "3.9"
+
+services:
+
+  pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./videos:/app/videos
+      - ./frames:/app/frames
+      - ./resultados:/app/resultados
+      - ./genus_map.json:/app/genus_map.json:ro
+      - model-cache:/root/.cache        # modelos baixados ficam em cache
+    environment:
+      PYTHONUNBUFFERED: "1"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    volumes:
+      - ./videos:/data/videos
+      - ./frames:/data/frames
+      - ./resultados:/data/resultados
+      - ./genus_map.json:/data/genus_map.json:ro
+    environment:
+      NODE_ENV: production
+      PIPELINE_URL: http://pipeline:8000
+      DATA_ROOT: /data
+    depends_on:
+      pipeline:
+        condition: service_healthy
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - frontend
+    restart: unless-stopped
+
+volumes:
+  model-cache:

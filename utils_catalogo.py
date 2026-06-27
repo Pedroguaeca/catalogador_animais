@@ -2,6 +2,7 @@
 import os
 import re
 import csv
+import json
 import cv2
 import unicodedata
 from datetime import datetime, timedelta
@@ -9,6 +10,20 @@ from datetime import datetime, timedelta
 import numpy as np
 from PytorchWildlife.models import detection as pw_det
 from PytorchWildlife.models import classification as pw_cls
+
+# Mapeamento científico → PT (lido de genus_map.json se disponível)
+def _load_genus_map() -> dict:
+    path = os.path.join(os.path.dirname(__file__), "genus_map.json")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+        return {k: v for k, v in raw.items() if not k.startswith("_")}
+    return {}
+
+_GENUS_MAP = _load_genus_map()
+
+def genus_to_pt(genus: str) -> str:
+    return _GENUS_MAP.get(genus, {}).get("pt", genus)
 
 # ---------------------------
 # Versão dos modelos (obrigatório para auditabilidade — ver CLAUDE.md)
@@ -202,7 +217,7 @@ def process_videos(
         wr = csv.writer(f)
         wr.writerow([
             "video", "frame", "crop", "timestamp (frame)",
-            "data", "hora", "genero", "det_conf", "cls_conf",
+            "data", "hora", "genero", "genero_pt", "det_conf", "cls_conf",
             "x1", "y1", "x2", "y2", "model_version",
         ])
 
@@ -240,6 +255,7 @@ def process_videos(
                             frame_idx,
                             data_str, hora_str,
                             genus,
+                            genus_to_pt(genus),
                             round(d_conf, 3),
                             round(c_conf, 3),
                             x1, y1, x2, y2,

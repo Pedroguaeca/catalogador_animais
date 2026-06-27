@@ -45,3 +45,12 @@ runs/
 
 # macOS
 .DS_Store
+
+# Variáveis de ambiente (segredos)
+.env.local
+frontend/.env.local
+
+# Node / Next.js
+frontend/node_modules/
+frontend/.next/
+

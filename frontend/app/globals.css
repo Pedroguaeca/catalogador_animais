@@ -1,0 +1,80 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* ── Cores base ── */
+    --background: 43 50% 96%;        /* #FAF6EE */
+    --foreground: 40 12% 12%;        /* #221F1A */
+    --card: 0 0% 100%;
+    --card-foreground: 40 12% 12%;
+
+    /* ── Primário (verde floresta) ── */
+    --primary: 152 39% 30%;          /* #2F6B4F */
+    --primary-foreground: 0 0% 100%;
+    --primary-hover: 152 39% 40%;   /* #3E8E63 */
+
+    /* ── Secundário ── */
+    --secondary: 43 50% 96%;
+    --secondary-foreground: 40 12% 12%;
+
+    /* ── Muted ── */
+    --muted: 41 22% 86%;
+    --muted-foreground: 36 8% 38%;   /* #6B6357 */
+
+    /* ── Accent (mel) ── */
+    --accent: 38 73% 56%;            /* #E2A33C */
+    --accent-foreground: 36 65% 14%; /* #3A2A0E */
+    --accent-hover: 32 63% 46%;     /* #C2802B */
+
+    /* ── Bordas e divisórias ── */
+    --border: 41 30% 86%;            /* #E7DECF */
+    --divider: 41 28% 92%;           /* #EFE8DB */
+    --input: 41 30% 86%;
+    --ring: 152 39% 30%;
+
+    /* ── Raio base ── */
+    --radius: 0.625rem;              /* 10px */
+
+    /* ── Destrutivo ── */
+    --destructive: 11 55% 50%;       /* #C2503A */
+    --destructive-foreground: 0 0% 100%;
+
+    /* ── Status ── */
+    --success: 145 52% 37%;          /* #2F8F4E */
+    --success-dot: 142 55% 64%;     /* #5FD08A */
+    --warning: 38 73% 56%;          /* #E2A33C */
+    --error: 11 55% 50%;            /* #C2503A */
+
+    /* ── Cards IA ── */
+    --ai-bg: 145 28% 94%;           /* #EEF5F0 */
+    --ai-border: 145 34% 84%;       /* #CDE3D6 */
+
+    /* ── Palco (ilha escura) ── */
+    --stage: 130 7% 10%;            /* #1A1E1A */
+  }
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+  body {
+    background-color: #FAF6EE;
+    color: #221F1A;
+    font-family: var(--font-ibm-plex-sans), "IBM Plex Sans", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Títulos usam Libre Franklin */
+  h1, h2, h3, h4, .font-title {
+    font-family: var(--font-libre-franklin), "Libre Franklin", sans-serif;
+  }
+}
+
+/* Scrollbar fina e discreta */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #C3BAA8; border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: #9A9080; }
