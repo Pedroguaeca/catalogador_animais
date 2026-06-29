@@ -1,0 +1,21 @@
+# ── Ingester (extração de frames, sem PyTorch) ───────────────────────────────
+# Build context: raiz do projeto (catalogador_animais/)
+# CDK: DockerImageCode.from_image_asset("..", file="pipeline/Dockerfile.ingester")
+#
+# Imagem leve (~200 MB vs ~1.2 GB do ML) — cold start rápido.
+
+FROM public.ecr.aws/lambda/python:3.11
+
+# cv2 precisa de libGL mesmo no modo headless
+RUN dnf install -y mesa-libGL && dnf clean all
+
+# Dependências mínimas: sem torch, sem ultralytics
+RUN pip install --no-cache-dir \
+    opencv-python-headless==4.10.0.84 \
+    numpy==2.2.6 \
+    boto3==1.43.36
+
+# Código do pipeline
+COPY pipeline/ ${LAMBDA_TASK_ROOT}/pipeline/
+
+CMD ["pipeline.ingester.lambda_handler"]
