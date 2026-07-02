@@ -1,10 +1,18 @@
 const nextConfig = {
   images: { unoptimized: true },
-  // Permite uploads grandes (vídeos de câmera-armadilha podem ter vários GB)
   experimental: {
     serverActions: {
       bodySizeLimit: "4gb",
     },
+  },
+  // Proxy: /api/v1/* → FastAPI em localhost:8000
+  async rewrites() {
+    return [
+      {
+        source:      "/api/v1/:path*",
+        destination: "http://localhost:8000/:path*",
+      },
+    ];
   },
 };
 
