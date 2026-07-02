@@ -2,13 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { UploadCloud, ClipboardList, Download, LayoutGrid } from "lucide-react";
+import { UploadCloud, ClipboardList, Download, LayoutGrid, BarChart2 } from "lucide-react";
 
 const links = [
-  { href: "/",       label: "Anotação",  icon: LayoutGrid },
-  { href: "/upload", label: "Upload",    icon: UploadCloud },
-  { href: "/review", label: "Revisão",   icon: ClipboardList },
-  { href: "/export", label: "Exportar",  icon: Download },
+  { href: "/",          label: "Anotação",   icon: LayoutGrid },
+  { href: "/upload",    label: "Upload",     icon: UploadCloud },
+  { href: "/review",    label: "Revisão",    icon: ClipboardList },
+  { href: "/dashboard", label: "Dashboard",  icon: BarChart2 },
+  { href: "/export",    label: "Exportar",   icon: Download },
 ];
 
 export function SiabNav() {

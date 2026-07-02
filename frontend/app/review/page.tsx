@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  CheckCircle2, XCircle, PencilLine, Loader2, AlertCircle, RefreshCw, X,
+  CheckCircle2, XCircle, PencilLine, Loader2, AlertCircle,
+  RefreshCw, X, SkipForward, Film,
 } from "lucide-react";
 import { SiabNav } from "../../src/components/SiabNav";
 
@@ -10,19 +11,28 @@ const PROJECT_ID = "projeto-junho-2026";
 const API_BASE   = `/api/v1`;
 
 interface Appearance {
-  appearance_id:   string;
-  species:         string;
-  species_score:   number;
-  camera_id:       string | null;
-  ts_start:        string | null;
-  support_frames:  number;
+  appearance_id:    string;
+  species:          string;
+  species_score:    number;
+  camera_id:        string | null;
+  ts_start:         string | null;
+  support_frames:   number;
   individual_count: number;
-  review_status:   string;
+  review_status:    string;
   best_crop_s3_key: string | null;
-  taxonomic_path:  string | null;
+  taxonomic_path:   string | null;
+  video_id?:        string;
 }
 
-type ActionState = "idle" | "loading" | "done" | "error";
+// Groups appearances by video. Prefers video_id; falls back to camera_id+date.
+function videoKey(app: Appearance): string {
+  if (app.video_id) return app.video_id;
+  return `${app.camera_id ?? "unknown"}|${app.ts_start?.slice(0, 10) ?? "nodate"}`;
+}
+
+function isLowConfidence(app: Appearance): boolean {
+  return app.support_frames <= 2 || app.species_score < 0.5;
+}
 
 function formatTs(ts: string | null): { date: string; time: string } {
   if (!ts) return { date: "—", time: "—" };
@@ -37,66 +47,134 @@ function formatTs(ts: string | null): { date: string; time: string } {
   }
 }
 
+// ── Small UI atoms ─────────────────────────────────────────────────────────────
+
+function Chip({ label, accent = false }: { label: string; accent?: boolean }) {
+  return (
+    <span className="px-2 py-0.5 rounded-full text-xs" style={{
+      background: accent ? "#FFF7E8" : "#FAF6EE",
+      color:      accent ? "#E2A33C" : "#6B6357",
+      border:     `1px solid ${accent ? "#F5DFA0" : "#E7DECF"}`,
+      fontFamily: "IBM Plex Sans, sans-serif",
+    }}>
+      {label}
+    </span>
+  );
+}
+
+function LowConfidenceBadge() {
+  return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold" style={{
+      background: "#FFF3E0", color: "#B45309", border: "1px solid #FBBF24",
+    }}>
+      ⚠ Baixa confiança
+    </span>
+  );
+}
+
 function ConfidenceDot({ score }: { score: number }) {
-  const pct = Math.round(score * 100);
+  const pct   = Math.round(score * 100);
   const color = pct >= 90 ? "#2F8F4E" : pct >= 70 ? "#E2A33C" : "#C2503A";
   return (
-    <span
-      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold"
-      style={{ background: `${color}18`, color }}
-    >
-      <span
-        className="inline-block rounded-full"
-        style={{ width: 6, height: 6, background: color }}
-      />
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold"
+      style={{ background: `${color}18`, color }}>
+      <span className="inline-block rounded-full" style={{ width: 6, height: 6, background: color }} />
       {pct}%
     </span>
   );
 }
 
-function AppearanceCard({
-  app,
-  onAction,
-}: {
-  app: Appearance;
-  onAction: (id: string, action: "confirm" | "reject" | "correct", species?: string) => Promise<void>;
-}) {
-  const [state,          setState]          = useState<ActionState>("idle");
-  const [correcting,     setCorrecting]     = useState(false);
-  const [correction,     setCorrection]     = useState("");
-  const [actionError,    setActionError]    = useState<string | null>(null);
+function KbdHint({ label }: { label: string }) {
+  return (
+    <kbd style={{
+      display: "inline-flex", alignItems: "center", padding: "1px 4px",
+      borderRadius: 4, fontSize: 9, fontWeight: 700, lineHeight: 1.6,
+      background: "rgba(0,0,0,0.07)", border: "1px solid rgba(0,0,0,0.14)",
+      color: "inherit", fontFamily: "IBM Plex Mono, monospace", letterSpacing: "0.01em",
+    }}>
+      {label}
+    </kbd>
+  );
+}
 
-  const { date, time } = formatTs(app.ts_start);
+// ── AppearanceCard ─────────────────────────────────────────────────────────────
+
+interface CardProps {
+  app:            Appearance;
+  focused:        boolean;
+  correcting:     boolean;
+  onAction:       (id: string, action: "confirm" | "reject" | "correct", species?: string) => Promise<void>;
+  onSkip:         () => void;
+  onConfirmVideo: () => void;
+  onOpenCorrect:  () => void;
+  onCloseCorrect: () => void;
+  onFocus:        () => void;
+  cardRef:        (el: HTMLDivElement | null) => void;
+}
+
+function AppearanceCard({
+  app, focused, correcting,
+  onAction, onSkip, onConfirmVideo, onOpenCorrect, onCloseCorrect, onFocus, cardRef,
+}: CardProps) {
+  const [actionState, setActionState] = useState<"idle" | "loading" | "done" | "error">("idle");
+  const [correction,  setCorrection]  = useState("");
+  const [actionError, setActionError] = useState<string | null>(null);
+  const corrInputRef = useRef<HTMLInputElement>(null);
+
+  // Open correction input when parent signals it
+  useEffect(() => {
+    if (correcting) {
+      setCorrection("");
+      // Defer focus to after render
+      requestAnimationFrame(() => corrInputRef.current?.focus());
+    }
+  }, [correcting]);
 
   const submit = async (action: "confirm" | "reject" | "correct", species?: string) => {
-    setState("loading");
+    setActionState("loading");
     setActionError(null);
     try {
       await onAction(app.appearance_id, action, species);
-      setState("done");
+      setActionState("done");
     } catch (e) {
-      setState("error");
+      setActionState("error");
       setActionError(String(e));
     }
   };
 
-  const F = { fontFamily: "IBM Plex Sans, sans-serif" };
+  const { date, time } = formatTs(app.ts_start);
+  const low = isLowConfidence(app);
 
-  if (state === "done") return null; // Remove card após ação
+  if (actionState === "done") return null;
 
   return (
     <div
+      ref={cardRef}
+      onClick={onFocus}
       className="flex flex-col gap-3 p-4 rounded-2xl bg-white"
-      style={{ border: "1px solid #E7DECF", ...F, opacity: state === "loading" ? 0.6 : 1, transition: "opacity 0.2s" }}
+      style={{
+        border:     `1.5px solid ${focused ? "#2F6B4F" : "#E7DECF"}`,
+        boxShadow:  focused
+          ? "0 0 0 3px #2F6B4F22, 0 2px 8px rgba(34,31,26,.06)"
+          : "0 1px 2px rgba(34,31,26,.04)",
+        opacity:    actionState === "loading" ? 0.6 : 1,
+        transition: "border-color 0.12s, box-shadow 0.12s, opacity 0.2s",
+        fontFamily: "IBM Plex Sans, sans-serif",
+        scrollMarginTop: 80,
+        cursor:     "default",
+      }}
     >
-      {/* Linha superior */}
+      {/* Species + badges */}
       <div className="flex items-start justify-between gap-3">
-        <div className="flex-1 min-w-0">
-          <p className="text-sm font-semibold italic" style={{ color: "#221F1A" }}>
-            {app.species}
-          </p>
+        <div className="flex-1 min-w-0 flex flex-col gap-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <p className="text-sm font-semibold italic" style={{ color: "#221F1A" }}>
+              {app.species}
+            </p>
+            {low && <LowConfidenceBadge />}
+          </div>
           {app.taxonomic_path && (
-            <p className="text-xs mt-0.5 truncate" style={{ color: "#9A9080" }}>
+            <p className="text-xs truncate" style={{ color: "#9A9080" }}>
               {app.taxonomic_path.split(";").join(" › ")}
             </p>
           )}
@@ -104,32 +182,32 @@ function AppearanceCard({
         <ConfidenceDot score={app.species_score} />
       </div>
 
-      {/* Meta */}
+      {/* Meta chips */}
       <div className="flex flex-wrap gap-2">
-        {app.camera_id && (
-          <Chip label={`Câmera ${app.camera_id}`} />
-        )}
+        {app.camera_id && <Chip label={`Câmera ${app.camera_id}`} />}
         <Chip label={date} />
         {time !== "—" && <Chip label={time} />}
         <Chip label={`${app.support_frames} frame${app.support_frames !== 1 ? "s" : ""}`} />
-        {app.individual_count > 1 && (
-          <Chip label={`${app.individual_count} indivíduos`} accent />
-        )}
+        {app.individual_count > 1 && <Chip label={`${app.individual_count} indivíduos`} accent />}
       </div>
 
-      {/* Correção inline */}
+      {/* Correction input (controlled by parent via correcting prop) */}
       {correcting && (
         <div className="flex items-center gap-2 mt-1">
           <input
+            ref={corrInputRef}
             type="text"
             placeholder="Nome científico correto…"
             value={correction}
             onChange={(e) => setCorrection(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && correction.trim()) submit("correct", correction.trim());
-              if (e.key === "Escape") { setCorrecting(false); setCorrection(""); }
+              e.stopPropagation(); // Prevent global shortcuts while typing
+              if (e.key === "Enter" && correction.trim()) {
+                submit("correct", correction.trim());
+                onCloseCorrect();
+              }
+              if (e.key === "Escape") { onCloseCorrect(); }
             }}
-            autoFocus
             style={{
               flex: 1, padding: "6px 10px", borderRadius: 8, fontSize: 13,
               border: "1.5px solid #CDE3D6", fontStyle: "italic",
@@ -137,61 +215,93 @@ function AppearanceCard({
             }}
           />
           <button
-            onClick={() => correction.trim() && submit("correct", correction.trim())}
-            disabled={!correction.trim() || state === "loading"}
+            tabIndex={0}
+            onClick={() => { if (correction.trim()) { submit("correct", correction.trim()); onCloseCorrect(); } }}
+            disabled={!correction.trim() || actionState === "loading"}
             style={{
               padding: "6px 12px", borderRadius: 8, fontSize: 12, fontWeight: 600,
-              background: "#2F6B4F", color: "#fff", border: "none", cursor: "pointer",
+              background: "#2F6B4F", color: "#fff", border: "none",
+              cursor: correction.trim() ? "pointer" : "default",
               fontFamily: "IBM Plex Sans, sans-serif",
             }}
           >
             Salvar
           </button>
           <button
-            onClick={() => { setCorrecting(false); setCorrection(""); }}
-            style={{
-              padding: 6, borderRadius: 8, background: "transparent", border: "none",
-              cursor: "pointer", color: "#9A9080",
-            }}
+            tabIndex={0}
+            onClick={onCloseCorrect}
+            style={{ padding: 6, borderRadius: 8, background: "transparent", border: "none", cursor: "pointer", color: "#9A9080" }}
           >
             <X size={14} />
           </button>
         </div>
       )}
 
-      {/* Erro de ação */}
       {actionError && (
         <p className="text-xs" style={{ color: "#C2503A" }}>{actionError}</p>
       )}
 
-      {/* Botões */}
-      {!correcting && state !== "loading" && (
-        <div className="flex items-center gap-2 pt-1">
-          <ActionBtn
-            icon={<CheckCircle2 size={13} />}
-            label="Confirmar"
-            color="#2F8F4E"
-            bg="#EEF5F0"
-            onClick={() => submit("confirm")}
-          />
-          <ActionBtn
-            icon={<XCircle size={13} />}
-            label="Rejeitar"
-            color="#C2503A"
-            bg="#FEF2EF"
-            onClick={() => submit("reject")}
-          />
-          <ActionBtn
-            icon={<PencilLine size={13} />}
-            label="Corrigir"
-            color="#6B6357"
-            bg="#FAF6EE"
-            onClick={() => setCorrecting(true)}
-          />
+      {/* Action buttons — Tab order: Confirmar(0) → Confirmar vídeo(0) → Pular(0) → Rejeitar(0) → Corrigir(0) */}
+      {!correcting && actionState !== "loading" && (
+        <div className="flex items-center gap-2 pt-1 flex-wrap">
+          <button
+            tabIndex={focused ? 0 : -1}
+            onClick={(e) => { e.stopPropagation(); submit("confirm"); }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium transition-opacity hover:opacity-80"
+            style={{ background: "#EEF5F0", color: "#2F8F4E", border: "1.5px solid #2F8F4E30", cursor: "pointer", fontFamily: "IBM Plex Sans, sans-serif" }}
+          >
+            <CheckCircle2 size={13} />
+            Confirmar
+            {focused && <KbdHint label="↵" />}
+          </button>
+
+          <button
+            tabIndex={focused ? 0 : -1}
+            onClick={(e) => { e.stopPropagation(); onConfirmVideo(); }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium transition-opacity hover:opacity-80"
+            style={{ background: "#EFF6FF", color: "#2563EB", border: "1.5px solid #2563EB30", cursor: "pointer", fontFamily: "IBM Plex Sans, sans-serif" }}
+          >
+            <Film size={13} />
+            Confirmar vídeo
+            {focused && <KbdHint label="⇧↵" />}
+          </button>
+
+          <button
+            tabIndex={focused ? 0 : -1}
+            onClick={(e) => { e.stopPropagation(); onSkip(); }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium transition-opacity hover:opacity-80"
+            style={{ background: "#FAF6EE", color: "#6B6357", border: "1.5px solid #C3BAA830", cursor: "pointer", fontFamily: "IBM Plex Sans, sans-serif" }}
+          >
+            <SkipForward size={13} />
+            Pular
+            {focused && <KbdHint label="S" />}
+          </button>
+
+          <button
+            tabIndex={focused ? 0 : -1}
+            onClick={(e) => { e.stopPropagation(); submit("reject"); }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium transition-opacity hover:opacity-80"
+            style={{ background: "#FEF2EF", color: "#C2503A", border: "1.5px solid #C2503A30", cursor: "pointer", fontFamily: "IBM Plex Sans, sans-serif" }}
+          >
+            <XCircle size={13} />
+            Rejeitar
+            {focused && <KbdHint label="R" />}
+          </button>
+
+          <button
+            tabIndex={focused ? 0 : -1}
+            onClick={(e) => { e.stopPropagation(); onOpenCorrect(); }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium transition-opacity hover:opacity-80"
+            style={{ background: "#FAF6EE", color: "#6B6357", border: "1.5px solid #6B635730", cursor: "pointer", fontFamily: "IBM Plex Sans, sans-serif" }}
+          >
+            <PencilLine size={13} />
+            Corrigir
+            {focused && <KbdHint label="C" />}
+          </button>
         </div>
       )}
 
-      {state === "loading" && (
+      {actionState === "loading" && (
         <div className="flex items-center gap-2 pt-1" style={{ color: "#9A9080" }}>
           <Loader2 size={13} className="animate-spin" />
           <span className="text-xs">Salvando…</span>
@@ -201,50 +311,68 @@ function AppearanceCard({
   );
 }
 
-function Chip({ label, accent = false }: { label: string; accent?: boolean }) {
+// ── Shortcut bar ───────────────────────────────────────────────────────────────
+
+function KbdBarHint({ label }: { label: string }) {
   return (
-    <span
-      className="px-2 py-0.5 rounded-full text-xs"
-      style={{
-        background: accent ? "#FFF7E8" : "#FAF6EE",
-        color:      accent ? "#E2A33C" : "#6B6357",
-        border:     `1px solid ${accent ? "#F5DFA0" : "#E7DECF"}`,
-        fontFamily: "IBM Plex Sans, sans-serif",
-      }}
-    >
+    <kbd style={{
+      display: "inline-flex", alignItems: "center", padding: "1px 5px",
+      borderRadius: 4, fontSize: 10, fontWeight: 600, lineHeight: 1.6,
+      background: "rgba(255,255,255,0.15)", border: "1px solid rgba(255,255,255,0.25)",
+      color: "inherit", fontFamily: "IBM Plex Mono, monospace",
+    }}>
       {label}
-    </span>
+    </kbd>
   );
 }
 
-function ActionBtn({
-  icon, label, color, bg, onClick,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  color: string;
-  bg: string;
-  onClick: () => void;
-}) {
+function ShortcutBar() {
+  const hints: { key: string; label: string }[] = [
+    { key: "↵",   label: "confirmar" },
+    { key: "⇧↵",  label: "vídeo inteiro" },
+    { key: "S",   label: "pular" },
+    { key: "R",   label: "rejeitar" },
+    { key: "C",   label: "corrigir" },
+    { key: "J/K", label: "navegar" },
+  ];
+
   return (
-    <button
-      onClick={onClick}
-      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium transition-opacity hover:opacity-75"
+    <div
+      className="fixed bottom-0 left-0 right-0 flex items-center justify-center flex-wrap gap-x-5 gap-y-1 px-6 py-2"
       style={{
-        background: bg, color, border: `1.5px solid ${color}30`,
-        fontFamily: "IBM Plex Sans, sans-serif", cursor: "pointer",
+        background: "rgba(34,31,26,0.85)",
+        backdropFilter: "blur(10px)",
+        fontFamily: "IBM Plex Sans, sans-serif",
+        zIndex: 50,
       }}
     >
-      {icon}
-      {label}
-    </button>
+      {hints.map(({ key, label }) => (
+        <span key={key} className="flex items-center gap-1.5 text-xs" style={{ color: "rgba(255,255,255,0.65)" }}>
+          <KbdBarHint label={key} />
+          {label}
+        </span>
+      ))}
+    </div>
   );
 }
+
+// ── Page ───────────────────────────────────────────────────────────────────────
 
 export default function ReviewPage() {
-  const [appearances, setAppearances] = useState<Appearance[]>([]);
-  const [loading,     setLoading]     = useState(true);
-  const [error,       setError]       = useState<string | null>(null);
+  const [appearances,  setAppearances]  = useState<Appearance[]>([]);
+  const [loading,      setLoading]      = useState(true);
+  const [error,        setError]        = useState<string | null>(null);
+  const [focusedIdx,   setFocusedIdx]   = useState(0);
+  const [correctingId, setCorrectingId] = useState<string | null>(null);
+
+  const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+
+  // Scroll focused card into view whenever the index changes
+  useEffect(() => {
+    const app = appearances[focusedIdx];
+    if (!app) return;
+    cardRefs.current.get(app.appearance_id)?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [focusedIdx, appearances]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -254,6 +382,7 @@ export default function ReviewPage() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setAppearances(data.items ?? []);
+      setFocusedIdx(0);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -263,7 +392,16 @@ export default function ReviewPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  const handleAction = async (
+  // Removes one appearance and adjusts focus to stay at same list position
+  const removeOne = useCallback((id: string) => {
+    setAppearances((prev) => {
+      const next = prev.filter((a) => a.appearance_id !== id);
+      setFocusedIdx((fi) => Math.min(fi, Math.max(0, next.length - 1)));
+      return next;
+    });
+  }, []);
+
+  const handleAction = useCallback(async (
     id: string,
     action: "confirm" | "reject" | "correct",
     species?: string,
@@ -277,13 +415,66 @@ export default function ReviewPage() {
       const text = await res.text().catch(() => "");
       throw new Error(`HTTP ${res.status}${text ? ": " + text : ""}`);
     }
-    setAppearances((prev) => prev.filter((a) => a.appearance_id !== id));
-  };
+    removeOne(id);
+  }, [removeOne]);
+
+  const handleSkip = useCallback(() => {
+    setFocusedIdx((i) => Math.min(i + 1, appearances.length - 1));
+  }, [appearances.length]);
+
+  // Confirms all appearances that share the same video as the currently focused one
+  const handleConfirmVideo = useCallback(async () => {
+    const pivot = appearances[focusedIdx];
+    if (!pivot) return;
+    const key     = videoKey(pivot);
+    const sameVid = appearances.filter((a) => videoKey(a) === key);
+    for (const a of sameVid) {
+      try { await handleAction(a.appearance_id, "confirm"); } catch { /* continue */ }
+    }
+  }, [appearances, focusedIdx, handleAction]);
+
+  // Global keyboard shortcuts — disabled while correction input is open
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (correctingId !== null) return; // Correction input handles its own keys
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
+      const app = appearances[focusedIdx];
+      if (!app) return;
+
+      if (e.key === "Enter" && e.shiftKey) {
+        e.preventDefault();
+        handleConfirmVideo();
+      } else if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        handleAction(app.appearance_id, "confirm");
+      } else if (e.key === "s" || e.key === "S" || e.key === "ArrowRight") {
+        e.preventDefault();
+        handleSkip();
+      } else if (e.key === "r" || e.key === "R") {
+        e.preventDefault();
+        handleAction(app.appearance_id, "reject");
+      } else if (e.key === "c" || e.key === "C") {
+        e.preventDefault();
+        setCorrectingId(app.appearance_id);
+      } else if (e.key === "j" || e.key === "J" || e.key === "ArrowDown") {
+        e.preventDefault();
+        setFocusedIdx((i) => Math.min(i + 1, appearances.length - 1));
+      } else if (e.key === "k" || e.key === "K" || e.key === "ArrowUp") {
+        e.preventDefault();
+        setFocusedIdx((i) => Math.max(i - 1, 0));
+      }
+    };
+
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [appearances, focusedIdx, correctingId, handleAction, handleConfirmVideo, handleSkip]);
 
   const F = { fontFamily: "IBM Plex Sans, sans-serif" };
 
   return (
-    <div className="min-h-screen" style={{ background: "#FAF6EE", ...F }}>
+    <div className="min-h-screen pb-12" style={{ background: "#FAF6EE", ...F }}>
       <SiabNav />
 
       <main className="max-w-2xl mx-auto px-4 py-10 flex flex-col gap-6">
@@ -300,23 +491,18 @@ export default function ReviewPage() {
           <button
             onClick={load}
             disabled={loading}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium transition-opacity"
-            style={{
-              background: "#FAF6EE", border: "1.5px solid #E7DECF",
-              color: "#6B6357", cursor: "pointer",
-            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-medium"
+            style={{ background: "#FAF6EE", border: "1.5px solid #E7DECF", color: "#6B6357", cursor: "pointer" }}
           >
             <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
             Atualizar
           </button>
         </div>
 
-        {/* Contagem */}
-        {!loading && !error && (
+        {/* Count + position indicator */}
+        {!loading && !error && appearances.length > 0 && (
           <p className="text-xs font-medium" style={{ color: "#9A9080" }}>
-            {appearances.length === 0
-              ? "Nenhuma aparição pendente."
-              : `${appearances.length} aparição${appearances.length !== 1 ? "s" : ""} aguardando revisão`}
+            {`${appearances.length} aparição${appearances.length !== 1 ? "s" : ""} aguardando revisão · revisando ${focusedIdx + 1} / ${appearances.length}`}
           </p>
         )}
 
@@ -328,48 +514,55 @@ export default function ReviewPage() {
           </div>
         )}
 
-        {/* Erro */}
+        {/* Error */}
         {error && (
-          <div
-            className="flex items-center gap-3 p-4 rounded-xl"
-            style={{ background: "#FEF2EF", border: "1.5px solid #F5C7BB" }}
-          >
+          <div className="flex items-center gap-3 p-4 rounded-xl"
+            style={{ background: "#FEF2EF", border: "1.5px solid #F5C7BB" }}>
             <AlertCircle size={16} style={{ color: "#C2503A", flexShrink: 0 }} />
             <div>
-              <p className="text-sm font-medium" style={{ color: "#C2503A" }}>
-                Erro ao carregar aparições
-              </p>
+              <p className="text-sm font-medium" style={{ color: "#C2503A" }}>Erro ao carregar aparições</p>
               <p className="text-xs mt-0.5" style={{ color: "#C2503A" }}>{error}</p>
-              <p className="text-xs mt-1" style={{ color: "#9A9080" }}>
-                Verifique se a API está rodando em localhost:8000
-              </p>
+              <p className="text-xs mt-1" style={{ color: "#9A9080" }}>Verifique se a API está rodando em localhost:8000</p>
             </div>
           </div>
         )}
 
         {/* Empty state */}
         {!loading && !error && appearances.length === 0 && (
-          <div
-            className="flex flex-col items-center gap-3 py-16 rounded-2xl"
-            style={{ background: "#fff", border: "1px solid #E7DECF" }}
-          >
+          <div className="flex flex-col items-center gap-3 py-16 rounded-2xl"
+            style={{ background: "#fff", border: "1px solid #E7DECF" }}>
             <CheckCircle2 size={32} style={{ color: "#5FD08A" }} />
             <p className="text-sm font-medium" style={{ color: "#221F1A" }}>Fila vazia!</p>
-            <p className="text-xs" style={{ color: "#9A9080" }}>
-              Todas as aparições foram revisadas.
-            </p>
+            <p className="text-xs" style={{ color: "#9A9080" }}>Todas as aparições foram revisadas.</p>
           </div>
         )}
 
-        {/* Lista */}
+        {/* Card list */}
         {!loading && !error && appearances.length > 0 && (
           <div className="flex flex-col gap-3">
-            {appearances.map((app) => (
-              <AppearanceCard key={app.appearance_id} app={app} onAction={handleAction} />
+            {appearances.map((app, idx) => (
+              <AppearanceCard
+                key={app.appearance_id}
+                app={app}
+                focused={idx === focusedIdx}
+                correcting={correctingId === app.appearance_id}
+                onAction={handleAction}
+                onSkip={handleSkip}
+                onConfirmVideo={handleConfirmVideo}
+                onOpenCorrect={() => setCorrectingId(app.appearance_id)}
+                onCloseCorrect={() => setCorrectingId(null)}
+                onFocus={() => setFocusedIdx(idx)}
+                cardRef={(el) => {
+                  if (el) cardRefs.current.set(app.appearance_id, el);
+                  else cardRefs.current.delete(app.appearance_id);
+                }}
+              />
             ))}
           </div>
         )}
       </main>
+
+      {!loading && !error && appearances.length > 0 && <ShortcutBar />}
     </div>
   );
 }
