@@ -85,15 +85,9 @@ class InfraStack(Stack):
         frame_annotations = ddb.Table(
             self, "SiabFrameAnnotations",
             table_name="siab-frame-annotations",
-            partition_key=ddb.Attribute(name="tenant_id",              type=ddb.AttributeType.STRING),
-            sort_key=    ddb.Attribute(name="video_id#frame_path",     type=ddb.AttributeType.STRING),
+            partition_key=ddb.Attribute(name="tenant_id",             type=ddb.AttributeType.STRING),
+            sort_key=    ddb.Attribute(name="appearance_id#frame_idx", type=ddb.AttributeType.STRING),
             **_common,
-        )
-        frame_annotations.add_global_secondary_index(
-            index_name="by-video",
-            partition_key=ddb.Attribute(name="tenant_id#video_id", type=ddb.AttributeType.STRING),
-            sort_key=     ddb.Attribute(name="frame_idx",          type=ddb.AttributeType.NUMBER),
-            projection_type=ddb.ProjectionType.ALL,
         )
 
         species = ddb.Table(
@@ -257,13 +251,14 @@ class InfraStack(Stack):
         )
 
         # ── Outputs ───────────────────────────────────────────────────────────
-        CfnOutput(self, "BucketName",          value=media_bucket.bucket_name)
-        CfnOutput(self, "ProjectsTable",       value=projects.table_name)
-        CfnOutput(self, "VideosTable",         value=videos_table.table_name)
-        CfnOutput(self, "CamerasTable",        value=cameras.table_name)
-        CfnOutput(self, "AppearancesTable",    value=appearances.table_name)
-        CfnOutput(self, "ReviewsTable",        value=reviews.table_name)
-        CfnOutput(self, "SpeciesTable",        value=species.table_name)
+        CfnOutput(self, "BucketName",              value=media_bucket.bucket_name)
+        CfnOutput(self, "ProjectsTable",           value=projects.table_name)
+        CfnOutput(self, "VideosTable",             value=videos_table.table_name)
+        CfnOutput(self, "CamerasTable",            value=cameras.table_name)
+        CfnOutput(self, "AppearancesTable",        value=appearances.table_name)
+        CfnOutput(self, "ReviewsTable",            value=reviews.table_name)
+        CfnOutput(self, "FrameAnnotationsTable",   value=frame_annotations.table_name)
+        CfnOutput(self, "SpeciesTable",            value=species.table_name)
         CfnOutput(self, "VideosQueueUrl",      value=videos_queue.queue_url)
         CfnOutput(self, "FramesQueueUrl",      value=frames_queue.queue_url)
         CfnOutput(self, "DetectionsQueueUrl",  value=detections_queue.queue_url)

@@ -214,49 +214,52 @@ def _frame_idx_from_path(frame_path: str) -> int:
     return int(stem.split("_")[-1])
 
 
-def _check_discrepancy(video_id: str, frame_idx: int, tenant_id: str) -> None:
-    """Flagga aparições com discrepância de espécie nos frames anotados."""
-    app_tbl = _appearances_table()
-    ann_tbl = _frame_annotations_table()
-    resp = app_tbl.query(
+def _appearances_for_frame(video_id: str, frame_idx: int, tenant_id: str) -> list[dict]:
+    """Retorna as aparições cujo intervalo [frame_start, frame_end] cobre frame_idx."""
+    resp = _appearances_table().query(
         KeyConditionExpression=Key("tenant_id").eq(tenant_id)
             & Key("video_id#appearance_id").begins_with(f"{video_id}#")
     )
-    for app_item in resp.get("Items", []):
-        f_start = int(app_item.get("frame_start", 0))
-        f_end   = int(app_item.get("frame_end", f_start))
-        if not (f_start <= frame_idx <= f_end):
-            continue
-        ann_resp = ann_tbl.query(
-            IndexName="by-video",
-            KeyConditionExpression=(
-                Key("tenant_id#video_id").eq(f"{tenant_id}#{video_id}")
-                & Key("frame_idx").between(f_start, f_end)
-            )
+    return [
+        a for a in resp.get("Items", [])
+        if int(a.get("frame_start", 0)) <= frame_idx <= int(a.get("frame_end", 0))
+    ]
+
+
+def _check_discrepancy(appearance_id: str, app_sk: str, tenant_id: str) -> None:
+    """Flagga uma aparição quando suas anotações de frame divergem de espécie."""
+    app_tbl = _appearances_table()
+    ann_tbl = _frame_annotations_table()
+
+    ann_resp = ann_tbl.query(
+        KeyConditionExpression=(
+            Key("tenant_id").eq(tenant_id)
+            & Key("appearance_id#frame_idx").begins_with(f"{appearance_id}#")
         )
-        species_set = {a["annotated_species"] for a in ann_resp.get("Items", [])}
-        sk = app_item["video_id#appearance_id"]
-        if len(species_set) > 1:
-            app_tbl.update_item(
-                Key={"tenant_id": tenant_id, "video_id#appearance_id": sk},
-                UpdateExpression="SET review_status = :rs, discrepant_species = :ds, #tr = :tr",
-                ExpressionAttributeNames={"#tr": "tenant_id#review_status"},
-                ExpressionAttributeValues={
-                    ":rs": "flagged_discrepancy",
-                    ":ds": list(species_set),
-                    ":tr": f"{tenant_id}#flagged_discrepancy",
-                },
-            )
-        elif app_item.get("review_status") == "flagged_discrepancy" and len(species_set) <= 1:
-            app_tbl.update_item(
-                Key={"tenant_id": tenant_id, "video_id#appearance_id": sk},
-                UpdateExpression="REMOVE discrepant_species SET review_status = :rs, #tr = :tr",
-                ExpressionAttributeNames={"#tr": "tenant_id#review_status"},
-                ExpressionAttributeValues={
-                    ":rs": "pending",
-                    ":tr": f"{tenant_id}#pending",
-                },
-            )
+    )
+    species_set = {a["annotated_species"] for a in ann_resp.get("Items", [])}
+
+    if len(species_set) > 1:
+        app_tbl.update_item(
+            Key={"tenant_id": tenant_id, "video_id#appearance_id": app_sk},
+            UpdateExpression="SET review_status = :rs, discrepant_species = :ds, #tr = :tr",
+            ExpressionAttributeNames={"#tr": "tenant_id#review_status"},
+            ExpressionAttributeValues={
+                ":rs": "flagged_discrepancy",
+                ":ds": list(species_set),
+                ":tr": f"{tenant_id}#flagged_discrepancy",
+            },
+        )
+    else:
+        app_tbl.update_item(
+            Key={"tenant_id": tenant_id, "video_id#appearance_id": app_sk},
+            UpdateExpression="REMOVE discrepant_species SET review_status = :rs, #tr = :tr",
+            ExpressionAttributeNames={"#tr": "tenant_id#review_status"},
+            ExpressionAttributeValues={
+                ":rs": "pending",
+                ":tr": f"{tenant_id}#pending",
+            },
+        )
 
 
 # ── Endpoint 1 — Upload de vídeo ──────────────────────────────────────────────
@@ -432,27 +435,34 @@ def review_appearance(appearance_id: str, body: ReviewRequest):
 
 @app.patch("/frames/annotation")
 def annotate_frame(body: AnnotationRequest):
-    """Persiste a anotação de espécie por frame e verifica discrepâncias na aparição."""
+    """Persiste anotação de espécie por frame e verifica discrepâncias nas aparições."""
     tenant_id    = TENANT_ID
     frame_idx    = _frame_idx_from_path(body.frame_path)
     frame_s3_key = f"{tenant_id}/frames/{body.frame_path}"
     annotated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     ann_tbl = _frame_annotations_table()
-    ann_tbl.put_item(Item={
-        "tenant_id":           tenant_id,
-        "video_id#frame_path": f"{body.video_id}#{body.frame_path}",
-        "tenant_id#video_id":  f"{tenant_id}#{body.video_id}",
-        "frame_annotation_id": str(uuid.uuid4()),
-        "video_id":            body.video_id,
-        "frame_path":          body.frame_path,
-        "frame_s3_key":        frame_s3_key,
-        "frame_idx":           frame_idx,
-        "annotated_species":   body.annotated_species,
-        "annotation_source":   body.annotation_source,
-        "annotated_at":        annotated_at,
-    })
-    _check_discrepancy(body.video_id, frame_idx, tenant_id)
-    return {"status": "ok", "frame_idx": frame_idx}
+
+    matched = _appearances_for_frame(body.video_id, frame_idx, tenant_id)
+    if not matched:
+        return {"status": "no_appearance", "frame_idx": frame_idx}
+
+    for app_item in matched:
+        appearance_id = app_item.get("appearance_id", "")
+        app_sk        = app_item["video_id#appearance_id"]
+        ann_tbl.put_item(Item={
+            "tenant_id":              tenant_id,
+            "appearance_id#frame_idx": f"{appearance_id}#{frame_idx:05d}",
+            "appearance_id":          appearance_id,
+            "frame_path":             body.frame_path,
+            "frame_s3_key":           frame_s3_key,
+            "frame_idx":              frame_idx,
+            "annotated_species":      body.annotated_species,
+            "annotation_source":      body.annotation_source,
+            "annotated_at":           annotated_at,
+        })
+        _check_discrepancy(appearance_id, app_sk, tenant_id)
+
+    return {"status": "ok", "frame_idx": frame_idx, "appearances_updated": len(matched)}
 
 
 # ── Endpoint 5 — Anotações de frame por aparição ─────────────────────────────
@@ -460,21 +470,20 @@ def annotate_frame(body: AnnotationRequest):
 
 @app.get("/appearances/{appearance_id}/frame-annotations")
 def get_frame_annotations(appearance_id: str):
-    """Retorna as anotações de frame para todos os frames de uma aparição."""
+    """Retorna as anotações de frame de uma aparição, ordenadas por frame_idx."""
     tenant_id = TENANT_ID
     app_tbl   = _appearances_table()
     ann_tbl   = _frame_annotations_table()
     app_item  = _find_appearance(app_tbl, tenant_id, appearance_id)
     if not app_item:
         raise HTTPException(status_code=404, detail="Aparição não encontrada")
-    video_id = app_item.get("video_id", "")
-    f_start  = int(app_item.get("frame_start", 0))
-    f_end    = int(app_item.get("frame_end", f_start))
+    f_start = int(app_item.get("frame_start", 0))
+    f_end   = int(app_item.get("frame_end", f_start))
+
     ann_resp = ann_tbl.query(
-        IndexName="by-video",
         KeyConditionExpression=(
-            Key("tenant_id#video_id").eq(f"{tenant_id}#{video_id}")
-            & Key("frame_idx").between(f_start, f_end)
+            Key("tenant_id").eq(tenant_id)
+            & Key("appearance_id#frame_idx").begins_with(f"{appearance_id}#")
         )
     )
     items = sorted(ann_resp.get("Items", []), key=lambda x: int(x.get("frame_idx", 0)))
