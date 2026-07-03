@@ -128,6 +128,6 @@ export async function downloadDriveFile(
     if (total > 0) onProgress?.(Math.round((received / total) * 100));
   }
 
-  const blob = new Blob(chunks, { type: mimeType });
+  const blob = new Blob(chunks as BlobPart[], { type: mimeType });
   return new File([blob], fileName, { type: mimeType });
 }
