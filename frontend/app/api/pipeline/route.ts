@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { spawn } from "child_process";
 import { getProjectRoot } from "../../../src/lib/data";
 
-export const maxDuration = 600;
+export const maxDuration = 300;
 
 export async function POST() {
   // ── Modo Docker: proxy para o container pipeline ──────────────────────────
