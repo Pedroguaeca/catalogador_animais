@@ -63,9 +63,12 @@ export function loadVideos(): Video[] {
       const time = row["hora"] ?? "";
       const dateFmt = date ? date.split("-").reverse().join("-") : "";
 
+      const video_uuid = framePath.split("/")[0] ?? "";
+
       return {
         idx: i + 1,
         path: framePath,          // relativo à pasta frames/
+        video_uuid,               // primeiro segmento = UUID usado nas S3 keys
         timestamp: dateFmt && time ? `${dateFmt} · ${time}` : "",
         date,
         time,

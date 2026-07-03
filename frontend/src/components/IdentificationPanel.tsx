@@ -71,6 +71,10 @@ export function IdentificationPanel({
     (c) => c.name.toLowerCase() === aiPt?.toLowerCase()
   )?.id ?? null;
 
+  const confirmLabel = selected
+    ? (categories.find((c) => c.id === selected)?.name ?? aiPt)
+    : aiPt;
+
   const font = { fontFamily: "IBM Plex Sans, sans-serif" };
   const labelStyle: React.CSSProperties = {
     fontSize: 11,
@@ -170,7 +174,7 @@ export function IdentificationPanel({
               onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = confirmed ? "#3E8E63" : "#2F6B4F")}
             >
               {confirmed && <Check size={13} style={{ color: "#A9E8C2" }} />}
-              Confirmar {aiPt}
+              Confirmar {confirmLabel}
               <kbd className="text-xs rounded px-1 py-0.5" style={{ background: "rgba(255,255,255,0.2)", fontFamily: "IBM Plex Mono, monospace" }}>⏎</kbd>
             </button>
 

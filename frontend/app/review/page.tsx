@@ -11,18 +11,29 @@ const PROJECT_ID = "projeto-junho-2026";
 const API_BASE   = `/api/v1`;
 
 interface Appearance {
-  appearance_id:    string;
-  species:          string;
-  species_score:    number;
-  camera_id:        string | null;
-  ts_start:         string | null;
-  support_frames:   number;
-  individual_count: number;
-  review_status:    string;
-  best_crop_s3_key: string | null;
-  thumbnail_url:    string | null;
-  taxonomic_path:   string | null;
-  video_id?:        string;
+  appearance_id:      string;
+  species:            string;
+  species_score:      number;
+  camera_id:          string | null;
+  ts_start:           string | null;
+  support_frames:     number;
+  individual_count:   number;
+  review_status:      string;
+  best_crop_s3_key:   string | null;
+  thumbnail_url:      string | null;
+  taxonomic_path:     string | null;
+  video_id?:          string;
+  discrepant_species: string[] | null;
+  frame_start:        number | null;
+  frame_end:          number | null;
+}
+
+interface FrameAnnotation {
+  frame_idx:         number;
+  frame_path:        string;
+  annotated_species: string;
+  annotation_source: string;
+  thumbnail_url:     string | null;
 }
 
 // Groups appearances by video. Prefers video_id; falls back to camera_id+date.
@@ -95,6 +106,167 @@ function KbdHint({ label }: { label: string }) {
     }}>
       {label}
     </kbd>
+  );
+}
+
+function DiscrepancyBadge({ species }: { species: string[] }) {
+  return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold" style={{
+      background: "#FEF2EF", color: "#C2503A", border: "1px solid #F5C7BB",
+    }}>
+      ⚠ Discrepância: {species.join(" × ")}
+    </span>
+  );
+}
+
+function FrameCarousel({ appearanceId }: { appearanceId: string }) {
+  const [annotations, setAnnotations] = useState<FrameAnnotation[]>([]);
+  const [loading, setLoading]         = useState(true);
+  const [activeIdx, setActiveIdx]     = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetch(`${API_BASE}/appearances/${appearanceId}/frame-annotations`)
+      .then((r) => r.json())
+      .then((d) => { if (!cancelled) { setAnnotations(d.items ?? []); setLoading(false); } })
+      .catch(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [appearanceId]);
+
+  if (loading) return (
+    <div className="flex items-center justify-center py-6" style={{ color: "#9A9080" }}>
+      <Loader2 size={14} className="animate-spin" />
+    </div>
+  );
+  if (annotations.length === 0) return null;
+
+  // Assign a color per unique species
+  const speciesColors: Record<string, string> = {};
+  const palette = ["#2F6B4F", "#C2503A", "#E2A33C", "#2563EB", "#7C3AED"];
+  const uniqueSpecies = Array.from(new Set(annotations.map((a) => a.annotated_species)));
+  uniqueSpecies.forEach((sp, i) => { speciesColors[sp] = palette[i % palette.length]; });
+
+  const active = annotations[activeIdx];
+
+  return (
+    <div className="flex flex-col gap-2">
+      {/* Main frame image */}
+      {active?.thumbnail_url && (
+        <div className="relative overflow-hidden rounded-xl" style={{ height: 160, background: "#EFE8DB" }}>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={active.thumbnail_url}
+            alt={`Frame ${active.frame_idx}`}
+            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+            onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+          />
+          <div style={{
+            position: "absolute", bottom: 6, left: 6, right: 6,
+            display: "flex", justifyContent: "space-between", alignItems: "flex-end",
+          }}>
+            <span style={{
+              padding: "2px 7px", borderRadius: 6, fontSize: 11, fontWeight: 600,
+              background: "rgba(34,31,26,0.72)", color: "#fff",
+              fontFamily: "IBM Plex Mono, monospace", backdropFilter: "blur(4px)",
+            }}>
+              frame {active.frame_idx}
+            </span>
+            <span style={{
+              padding: "2px 7px", borderRadius: 6, fontSize: 11, fontWeight: 700,
+              background: speciesColors[active.annotated_species] ?? "#2F6B4F",
+              color: "#fff", backdropFilter: "blur(4px)",
+              fontFamily: "IBM Plex Sans, sans-serif",
+            }}>
+              {active.annotated_species}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Thumbnail strip */}
+      <div className="flex gap-1.5 overflow-x-auto pb-1" style={{ scrollbarWidth: "none" }}>
+        {annotations.map((ann, i) => {
+          const color = speciesColors[ann.annotated_species] ?? "#2F6B4F";
+          const isActive = i === activeIdx;
+          return (
+            <button
+              key={ann.frame_idx}
+              onClick={() => setActiveIdx(i)}
+              style={{
+                flexShrink: 0, width: 52, height: 40, borderRadius: 7,
+                overflow: "hidden", position: "relative",
+                border: isActive ? `2.5px solid ${color}` : "2px solid transparent",
+                outline: "none", cursor: "pointer", padding: 0,
+                background: "#EFE8DB",
+              }}
+            >
+              {ann.thumbnail_url
+                ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={ann.thumbnail_url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                )
+                : (
+                  <span style={{ fontSize: 9, color: "#9A9080", fontFamily: "IBM Plex Mono, monospace" }}>
+                    {ann.frame_idx}
+                  </span>
+                )
+              }
+              {/* Species colour dot */}
+              <span style={{
+                position: "absolute", bottom: 2, right: 2,
+                width: 6, height: 6, borderRadius: "50%", background: color,
+                border: "1px solid rgba(255,255,255,0.7)",
+              }} />
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── DiscrepancyResolver ────────────────────────────────────────────────────────
+
+function DiscrepancyResolver({
+  species, onResolve, loading,
+}: {
+  species: string[];
+  onResolve: (sp: string) => void;
+  loading: boolean;
+}) {
+  const [selected, setSelected] = useState(species[0] ?? "");
+  return (
+    <div className="flex items-center gap-2 p-3 rounded-xl"
+      style={{ background: "#FEF9F0", border: "1.5px solid #F5DFA0" }}>
+      <span className="text-xs font-semibold flex-shrink-0" style={{ color: "#B45309" }}>
+        Resolver discrepância:
+      </span>
+      <select
+        value={selected}
+        onChange={(e) => setSelected(e.target.value)}
+        style={{
+          flex: 1, padding: "4px 8px", borderRadius: 7, fontSize: 12,
+          border: "1.5px solid #F5DFA0", background: "#fff",
+          fontFamily: "IBM Plex Sans, sans-serif", color: "#221F1A",
+        }}
+      >
+        {species.map((sp) => (
+          <option key={sp} value={sp}>{sp}</option>
+        ))}
+      </select>
+      <button
+        onClick={() => onResolve(selected)}
+        disabled={loading || !selected}
+        style={{
+          padding: "4px 12px", borderRadius: 7, fontSize: 12, fontWeight: 600,
+          background: "#E2A33C", color: "#3A2A0E", border: "none", cursor: "pointer",
+          fontFamily: "IBM Plex Sans, sans-serif",
+        }}
+      >
+        Confirmar
+      </button>
+    </div>
   );
 }
 
@@ -173,6 +345,9 @@ function AppearanceCard({
               {app.species}
             </p>
             {low && <LowConfidenceBadge />}
+            {app.review_status === "flagged_discrepancy" && app.discrepant_species && (
+              <DiscrepancyBadge species={app.discrepant_species} />
+            )}
           </div>
           {app.taxonomic_path && (
             <p className="text-xs truncate" style={{ color: "#9A9080" }}>
@@ -183,12 +358,11 @@ function AppearanceCard({
         <ConfidenceDot score={app.species_score} />
       </div>
 
-      {/* Frame thumbnail */}
-      {app.thumbnail_url && (
-        <div
-          className="relative overflow-hidden rounded-xl"
-          style={{ height: 140, background: "#EFE8DB" }}
-        >
+      {/* Frame evidence: carousel for discrepant, single thumbnail otherwise */}
+      {app.review_status === "flagged_discrepancy" ? (
+        <FrameCarousel appearanceId={app.appearance_id} />
+      ) : app.thumbnail_url ? (
+        <div className="relative overflow-hidden rounded-xl" style={{ height: 140, background: "#EFE8DB" }}>
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={app.thumbnail_url}
@@ -196,23 +370,27 @@ function AppearanceCard({
             style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
             onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
           />
-          {/* Timestamp overlay */}
           {time !== "—" && (
-            <span
-              style={{
-                position: "absolute", bottom: 6, left: 6,
-                padding: "2px 7px", borderRadius: 6,
-                fontSize: 11, fontWeight: 600, letterSpacing: "0.01em",
-                background: "rgba(34,31,26,0.72)",
-                color: "#fff",
-                fontFamily: "IBM Plex Mono, monospace",
-                backdropFilter: "blur(4px)",
-              }}
-            >
+            <span style={{
+              position: "absolute", bottom: 6, left: 6,
+              padding: "2px 7px", borderRadius: 6,
+              fontSize: 11, fontWeight: 600, letterSpacing: "0.01em",
+              background: "rgba(34,31,26,0.72)", color: "#fff",
+              fontFamily: "IBM Plex Mono, monospace", backdropFilter: "blur(4px)",
+            }}>
               {time}
             </span>
           )}
         </div>
+      ) : null}
+
+      {/* Discrepancy resolution — species picker */}
+      {app.review_status === "flagged_discrepancy" && app.discrepant_species && !correcting && (
+        <DiscrepancyResolver
+          species={app.discrepant_species}
+          onResolve={(sp) => submit("correct", sp)}
+          loading={actionState === "loading"}
+        />
       )}
 
       {/* Meta chips */}
@@ -411,10 +589,20 @@ export default function ReviewPage() {
     setLoading(true);
     setError(null);
     try {
-      const res  = await fetch(`${API_BASE}/projects/${PROJECT_ID}/appearances?review_status=pending`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      setAppearances(data.items ?? []);
+      const [pendingRes, discrepantRes] = await Promise.all([
+        fetch(`${API_BASE}/projects/${PROJECT_ID}/appearances?review_status=pending`),
+        fetch(`${API_BASE}/projects/${PROJECT_ID}/appearances?review_status=flagged_discrepancy`),
+      ]);
+      if (!pendingRes.ok) throw new Error(`HTTP ${pendingRes.status}`);
+      const [pendingData, discrepantData] = await Promise.all([
+        pendingRes.json(),
+        discrepantRes.ok ? discrepantRes.json() : Promise.resolve({ items: [] }),
+      ]);
+      const combined = [
+        ...(discrepantData.items ?? []),
+        ...(pendingData.items ?? []),
+      ];
+      setAppearances(combined);
       setFocusedIdx(0);
     } catch (e) {
       setError(String(e));

@@ -36,12 +36,13 @@ logger = logging.getLogger(__name__)
 
 # ── Configuração ───────────────────────────────────────────────────────────────
 
-TENANT_ID         = os.environ.get("SIAB_TENANT",        "consultoria-teste")
-BUCKET            = os.environ.get("SIAB_BUCKET",        "siab-media-dev")
-APPEARANCES_TABLE = os.environ.get("APPEARANCES_TABLE",  "siab-appearances")
-REVIEWS_TABLE     = os.environ.get("REVIEWS_TABLE",      "siab-reviews")
-VIDEOS_QUEUE_NAME = os.environ.get("VIDEOS_QUEUE_NAME",  "siab-videos")
-AWS_REGION        = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+TENANT_ID               = os.environ.get("SIAB_TENANT",              "consultoria-teste")
+BUCKET                  = os.environ.get("SIAB_BUCKET",              "siab-media-dev")
+APPEARANCES_TABLE       = os.environ.get("APPEARANCES_TABLE",        "siab-appearances")
+REVIEWS_TABLE           = os.environ.get("REVIEWS_TABLE",            "siab-reviews")
+FRAME_ANNOTATIONS_TABLE = os.environ.get("FRAME_ANNOTATIONS_TABLE",  "siab-frame-annotations")
+VIDEOS_QUEUE_NAME       = os.environ.get("VIDEOS_QUEUE_NAME",        "siab-videos")
+AWS_REGION              = os.environ.get("AWS_DEFAULT_REGION",       "us-east-1")
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
@@ -76,12 +77,23 @@ def _reviews_table():
     return boto3.resource("dynamodb", region_name=AWS_REGION).Table(REVIEWS_TABLE)
 
 
+def _frame_annotations_table():
+    return boto3.resource("dynamodb", region_name=AWS_REGION).Table(FRAME_ANNOTATIONS_TABLE)
+
+
 # ── Schemas ────────────────────────────────────────────────────────────────────
 
 
 class ReviewRequest(BaseModel):
     action: Literal["confirm", "reject", "correct"]
     corrected_species: str | None = None
+
+
+class AnnotationRequest(BaseModel):
+    video_id:          str
+    frame_path:        str
+    annotated_species: str
+    annotation_source: Literal["ai_confirm", "chip_select", "new_category"]
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -194,6 +206,57 @@ def _presigned_url(s3_key: str | None, expiry: int = 3600) -> str | None:
         )
     except Exception:
         return None
+
+
+def _frame_idx_from_path(frame_path: str) -> int:
+    """Extrai índice numérico do frame. '69bf.../frame_00003.jpg' → 3"""
+    stem = os.path.splitext(os.path.basename(frame_path))[0]
+    return int(stem.split("_")[-1])
+
+
+def _check_discrepancy(video_id: str, frame_idx: int, tenant_id: str) -> None:
+    """Flagga aparições com discrepância de espécie nos frames anotados."""
+    app_tbl = _appearances_table()
+    ann_tbl = _frame_annotations_table()
+    resp = app_tbl.query(
+        KeyConditionExpression=Key("tenant_id").eq(tenant_id)
+            & Key("video_id#appearance_id").begins_with(f"{video_id}#")
+    )
+    for app_item in resp.get("Items", []):
+        f_start = int(app_item.get("frame_start", 0))
+        f_end   = int(app_item.get("frame_end", f_start))
+        if not (f_start <= frame_idx <= f_end):
+            continue
+        ann_resp = ann_tbl.query(
+            IndexName="by-video",
+            KeyConditionExpression=(
+                Key("tenant_id#video_id").eq(f"{tenant_id}#{video_id}")
+                & Key("frame_idx").between(f_start, f_end)
+            )
+        )
+        species_set = {a["annotated_species"] for a in ann_resp.get("Items", [])}
+        sk = app_item["video_id#appearance_id"]
+        if len(species_set) > 1:
+            app_tbl.update_item(
+                Key={"tenant_id": tenant_id, "video_id#appearance_id": sk},
+                UpdateExpression="SET review_status = :rs, discrepant_species = :ds, #tr = :tr",
+                ExpressionAttributeNames={"#tr": "tenant_id#review_status"},
+                ExpressionAttributeValues={
+                    ":rs": "flagged_discrepancy",
+                    ":ds": list(species_set),
+                    ":tr": f"{tenant_id}#flagged_discrepancy",
+                },
+            )
+        elif app_item.get("review_status") == "flagged_discrepancy" and len(species_set) <= 1:
+            app_tbl.update_item(
+                Key={"tenant_id": tenant_id, "video_id#appearance_id": sk},
+                UpdateExpression="REMOVE discrepant_species SET review_status = :rs, #tr = :tr",
+                ExpressionAttributeNames={"#tr": "tenant_id#review_status"},
+                ExpressionAttributeValues={
+                    ":rs": "pending",
+                    ":tr": f"{tenant_id}#pending",
+                },
+            )
 
 
 # ── Endpoint 1 — Upload de vídeo ──────────────────────────────────────────────
@@ -364,7 +427,71 @@ def review_appearance(appearance_id: str, body: ReviewRequest):
     return _clean(resp.get("Attributes", {}))
 
 
-# ── Endpoint 4 — Export CSV ───────────────────────────────────────────────────
+# ── Endpoint 4 — Anotação de frame ────────────────────────────────────────────
+
+
+@app.patch("/frames/annotation")
+def annotate_frame(body: AnnotationRequest):
+    """Persiste a anotação de espécie por frame e verifica discrepâncias na aparição."""
+    tenant_id    = TENANT_ID
+    frame_idx    = _frame_idx_from_path(body.frame_path)
+    frame_s3_key = f"{tenant_id}/frames/{body.frame_path}"
+    annotated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+    ann_tbl = _frame_annotations_table()
+    ann_tbl.put_item(Item={
+        "tenant_id":           tenant_id,
+        "video_id#frame_path": f"{body.video_id}#{body.frame_path}",
+        "tenant_id#video_id":  f"{tenant_id}#{body.video_id}",
+        "frame_annotation_id": str(uuid.uuid4()),
+        "video_id":            body.video_id,
+        "frame_path":          body.frame_path,
+        "frame_s3_key":        frame_s3_key,
+        "frame_idx":           frame_idx,
+        "annotated_species":   body.annotated_species,
+        "annotation_source":   body.annotation_source,
+        "annotated_at":        annotated_at,
+    })
+    _check_discrepancy(body.video_id, frame_idx, tenant_id)
+    return {"status": "ok", "frame_idx": frame_idx}
+
+
+# ── Endpoint 5 — Anotações de frame por aparição ─────────────────────────────
+
+
+@app.get("/appearances/{appearance_id}/frame-annotations")
+def get_frame_annotations(appearance_id: str):
+    """Retorna as anotações de frame para todos os frames de uma aparição."""
+    tenant_id = TENANT_ID
+    app_tbl   = _appearances_table()
+    ann_tbl   = _frame_annotations_table()
+    app_item  = _find_appearance(app_tbl, tenant_id, appearance_id)
+    if not app_item:
+        raise HTTPException(status_code=404, detail="Aparição não encontrada")
+    video_id = app_item.get("video_id", "")
+    f_start  = int(app_item.get("frame_start", 0))
+    f_end    = int(app_item.get("frame_end", f_start))
+    ann_resp = ann_tbl.query(
+        IndexName="by-video",
+        KeyConditionExpression=(
+            Key("tenant_id#video_id").eq(f"{tenant_id}#{video_id}")
+            & Key("frame_idx").between(f_start, f_end)
+        )
+    )
+    items = sorted(ann_resp.get("Items", []), key=lambda x: int(x.get("frame_idx", 0)))
+    result = [
+        {**_clean(it), "thumbnail_url": _presigned_url(it.get("frame_s3_key"))}
+        for it in items
+    ]
+    return {
+        "appearance_id": appearance_id,
+        "frame_start":   f_start,
+        "frame_end":     f_end,
+        "count":         len(result),
+        "items":         result,
+    }
+
+
+# ── Endpoint 7 — Export CSV ───────────────────────────────────────────────────
 
 
 @app.get("/projects/{project_id}/appearances/export")

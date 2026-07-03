@@ -9,6 +9,7 @@ export interface Detection {
 export interface Frame {
   idx: number;          // frame number in video
   path: string;        // relative path from /api/image?p=...
+  video_uuid: string;  // first segment of path = UUID used in S3 keys
   timestamp: string;   // "DD-MM-YYYY · HH:MM:SS"
   date: string;
   time: string;

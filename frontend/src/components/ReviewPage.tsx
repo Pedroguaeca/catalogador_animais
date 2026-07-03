@@ -9,6 +9,28 @@ import { Filmstrip } from "./Filmstrip";
 import { IdentificationPanel } from "./IdentificationPanel";
 import { BottomBar } from "./BottomBar";
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
+function persistFrameAnnotation(
+  videoId: string,
+  framePath: string,
+  annotatedSpecies: string,
+  source: "ai_confirm" | "chip_select" | "new_category"
+) {
+  const video_uuid = framePath.split("/")[0] ?? "";
+  if (!video_uuid || !framePath) return;
+  fetch(`${API_BASE}/frames/annotation`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      video_id:          video_uuid,
+      frame_path:        framePath,
+      annotated_species: annotatedSpecies,
+      annotation_source: source,
+    }),
+  }).catch(() => {});
+}
+
 interface ReviewPageProps {
   videos: Video[];
 }
@@ -107,10 +129,17 @@ export function ReviewPage({ videos }: ReviewPageProps) {
           onSelect={(id) => {
             dispatch({ type: "SELECT", payload: id });
             dispatch({ type: "MARK_ANNOTATED" });
+            if (frame?.path) {
+              const name = state.categories.find((c) => c.id === id)?.name ?? id;
+              persistFrameAnnotation(state.videoId, frame.path, name, "chip_select");
+            }
           }}
           onConfirmAI={() => {
             dispatch({ type: "CONFIRM_AI" });
             dispatch({ type: "MARK_ANNOTATED" });
+            if (frame?.path && frame.detection) {
+              persistFrameAnnotation(state.videoId, frame.path, frame.detection.genus, "ai_confirm");
+            }
           }}
           onConfirmVideo={() => dispatch({ type: "CONFIRM_ALL_VIDEO", payload: totalFrames })}
           onReject={() => dispatch({ type: "REJECT" })}
@@ -123,6 +152,9 @@ export function ReviewPage({ videos }: ReviewPageProps) {
           onAddCategory={(name) => {
             dispatch({ type: "ADD_CATEGORY", payload: name });
             dispatch({ type: "MARK_ANNOTATED" });
+            if (frame?.path) {
+              persistFrameAnnotation(state.videoId, frame.path, name, "new_category");
+            }
           }}
         />
       </div>

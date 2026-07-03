@@ -82,6 +82,20 @@ class InfraStack(Stack):
             **_common,
         )
 
+        frame_annotations = ddb.Table(
+            self, "SiabFrameAnnotations",
+            table_name="siab-frame-annotations",
+            partition_key=ddb.Attribute(name="tenant_id",              type=ddb.AttributeType.STRING),
+            sort_key=    ddb.Attribute(name="video_id#frame_path",     type=ddb.AttributeType.STRING),
+            **_common,
+        )
+        frame_annotations.add_global_secondary_index(
+            index_name="by-video",
+            partition_key=ddb.Attribute(name="tenant_id#video_id", type=ddb.AttributeType.STRING),
+            sort_key=     ddb.Attribute(name="frame_idx",          type=ddb.AttributeType.NUMBER),
+            projection_type=ddb.ProjectionType.ALL,
+        )
+
         species = ddb.Table(
             self, "SiabSpecies",
             table_name="siab-species",
@@ -147,9 +161,10 @@ class InfraStack(Stack):
             self, "IngesterFn",
             function_name="siab-ingester",
             code=_lambda.DockerImageCode.from_image_asset(
-                directory="..",
-                file="pipeline/Dockerfile.ingester",
+                directory="../pipeline",
+                file="Dockerfile.ingester",
             ),
+            architecture=_lambda.Architecture.ARM_64,
             memory_size=512,
             timeout=_lambda_timeout,
             environment={
@@ -163,9 +178,10 @@ class InfraStack(Stack):
             self, "MegaDetectorFn",
             function_name="siab-megadetector",
             code=_lambda.DockerImageCode.from_image_asset(
-                directory="..",
-                file="pipeline/Dockerfile",
+                directory="../pipeline",
+                file="Dockerfile",
             ),
+            architecture=_lambda.Architecture.ARM_64,
             memory_size=3008,
             timeout=_lambda_timeout,
             environment={
@@ -174,6 +190,30 @@ class InfraStack(Stack):
                 "DETECTIONS_QUEUE_URL": detections_queue.queue_url,
                 "MD_CACHE_DIR":         "/tmp/models",
                 "MD_THRESHOLD":         "0.1",
+            },
+        )
+
+        # ── Lambda — SpeciesNet (mesma imagem ML, STAGE=speciesnet) ──────────
+        speciesnet_fn = _lambda.DockerImageFunction(
+            self, "SpeciesNetFn",
+            function_name="siab-speciesnet",
+            code=_lambda.DockerImageCode.from_image_asset(
+                directory="../pipeline",
+                file="Dockerfile",
+            ),
+            architecture=_lambda.Architecture.ARM_64,
+            memory_size=3008,
+            timeout=_lambda_timeout,
+            environment={
+                "SIAB_BUCKET":         "siab-media-dev",
+                "STAGE":               "speciesnet",
+                "APPEARANCES_TABLE":   appearances.table_name,
+                "SIAB_COUNTRY":        "BRA",
+                "GAP_FRAMES":          "15",
+                "SN_MODEL":            "/tmp/models/speciesnet/v4.0.3a",
+                "SN_MODEL_S3_PREFIX":  "models/speciesnet/v4.0.3a",
+                "SN_MODEL_LOCAL_DIR":  "/tmp/models/speciesnet/v4.0.3a",
+                "SN_MODEL_VERSION":    "speciesnet-v5.0.5",
             },
         )
 
@@ -188,18 +228,30 @@ class InfraStack(Stack):
         media_bucket.grant_read(megadetector_fn)
         detections_queue.grant_send_messages(megadetector_fn)
 
+        # ── IAM — SpeciesNet ─────────────────────────────────────────────────
+        # Lê frames do S3 + escreve Aparições no DynamoDB
+        media_bucket.grant_read(speciesnet_fn)
+        appearances.grant_write_data(speciesnet_fn)
+
         # ── Event Source Mappings (SQS → Lambda) ─────────────────────────────
         ingester_fn.add_event_source(
             eventsources.SqsEventSource(
                 videos_queue,
-                batch_size=1,           # 1 vídeo por invocação
+                batch_size=1,
                 report_batch_item_failures=True,
             )
         )
         megadetector_fn.add_event_source(
             eventsources.SqsEventSource(
                 frames_queue,
-                batch_size=1,           # 1 lote de frames por invocação
+                batch_size=1,
+                report_batch_item_failures=True,
+            )
+        )
+        speciesnet_fn.add_event_source(
+            eventsources.SqsEventSource(
+                detections_queue,
+                batch_size=1,
                 report_batch_item_failures=True,
             )
         )
@@ -217,3 +269,4 @@ class InfraStack(Stack):
         CfnOutput(self, "DetectionsQueueUrl",  value=detections_queue.queue_url)
         CfnOutput(self, "IngesterFnArn",       value=ingester_fn.function_arn)
         CfnOutput(self, "MegaDetectorFnArn",   value=megadetector_fn.function_arn)
+        CfnOutput(self, "SpeciesNetFnArn",     value=speciesnet_fn.function_arn)
