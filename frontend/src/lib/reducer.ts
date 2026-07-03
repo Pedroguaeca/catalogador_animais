@@ -73,6 +73,13 @@ export function reviewReducer(state: ReviewState, action: ReviewAction): ReviewS
     case "SET_NEW_CAT_NAME":
       return { ...state, newCatName: action.payload };
 
+    case "CONFIRM_ALL_VIDEO": {
+      const totalFrames = action.payload;
+      const next = new Set(state.annotatedFrames);
+      for (let i = 1; i <= totalFrames; i++) next.add(i);
+      return { ...state, annotatedFrames: next, annotated: next.size, confirmed: true };
+    }
+
     case "ADD_CATEGORY": {
       const name = action.payload.trim();
       if (!name) return state;

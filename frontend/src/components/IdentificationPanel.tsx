@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useEffect } from "react";
-import { Search, X, Sparkles, Check } from "lucide-react";
+import { Search, X, Sparkles, Check, ChevronLeft, ChevronRight, SkipForward, Film } from "lucide-react";
 import type { Detection, Category } from "../lib/types";
 
 interface IdentificationPanelProps {
@@ -12,10 +12,16 @@ interface IdentificationPanelProps {
   confirmed: boolean;
   newCatOpen: boolean;
   newCatName: string;
+  frameIdx: number;
+  totalFrames: number;
   onQuery: (q: string) => void;
   onSelect: (id: string) => void;
   onConfirmAI: () => void;
+  onConfirmVideo: () => void;
   onReject: () => void;
+  onPrevFrame: () => void;
+  onNextFrame: () => void;
+  onSkipFrame: () => void;
   onOpenNewCat: () => void;
   onCloseNewCat: () => void;
   onNewCatName: (name: string) => void;
@@ -30,10 +36,16 @@ export function IdentificationPanel({
   confirmed,
   newCatOpen,
   newCatName,
+  frameIdx,
+  totalFrames,
   onQuery,
   onSelect,
   onConfirmAI,
+  onConfirmVideo,
   onReject,
+  onPrevFrame,
+  onNextFrame,
+  onSkipFrame,
   onOpenNewCat,
   onCloseNewCat,
   onNewCatName,
@@ -121,71 +133,14 @@ export function IdentificationPanel({
                 >
                   {aiPt}
                 </p>
-                <p
-                  className="italic text-sm mt-0.5"
-                  style={{ color: "#6B6357", ...font }}
-                >
+                <p className="italic text-sm mt-0.5" style={{ color: "#6B6357", ...font }}>
                   {aiGenus}
                 </p>
               </div>
 
               {/* Barra de confiança */}
-              <div
-                className="rounded-full overflow-hidden"
-                style={{ height: 5, background: "#DCEBE1" }}
-              >
-                <div
-                  className="h-full rounded-full"
-                  style={{ width: `${confidence}%`, background: "#3E8E63" }}
-                />
-              </div>
-
-              {/* Ações */}
-              <div className="flex gap-2 items-center">
-                <button
-                  onClick={onConfirmAI}
-                  className="flex-1 flex items-center justify-center gap-2 text-sm font-semibold text-white transition-colors"
-                  style={{
-                    background: confirmed ? "#3E8E63" : "#2F6B4F",
-                    borderRadius: 10,
-                    padding: "9px 14px",
-                    ...font,
-                  }}
-                  onMouseEnter={(e) =>
-                    ((e.target as HTMLElement).style.background = "#3E8E63")
-                  }
-                  onMouseLeave={(e) =>
-                    ((e.target as HTMLElement).style.background = confirmed ? "#3E8E63" : "#2F6B4F")
-                  }
-                >
-                  {confirmed && <Check size={14} style={{ color: "#A9E8C2" }} />}
-                  Confirmar {aiPt}
-                  <kbd
-                    className="text-xs rounded px-1 py-0.5"
-                    style={{
-                      background: "rgba(255,255,255,0.2)",
-                      fontFamily: "IBM Plex Mono, monospace",
-                    }}
-                  >
-                    ⏎
-                  </kbd>
-                </button>
-                <button
-                  onClick={onReject}
-                  className="flex items-center justify-center transition-colors hover:bg-red-50"
-                  style={{
-                    width: 36,
-                    height: 36,
-                    borderRadius: 10,
-                    border: "1.5px solid #E7DECF",
-                    background: "#fff",
-                    color: "#6B6357",
-                    flexShrink: 0,
-                  }}
-                  title="Rejeitar sugestão"
-                >
-                  <X size={14} />
-                </button>
+              <div className="rounded-full overflow-hidden" style={{ height: 5, background: "#DCEBE1" }}>
+                <div className="h-full rounded-full" style={{ width: `${confidence}%`, background: "#3E8E63" }} />
               </div>
             </>
           ) : (
@@ -193,6 +148,108 @@ export function IdentificationPanel({
               Nenhuma detecção neste frame.
             </p>
           )}
+        </div>
+      </div>
+
+      {/* ── Faixa de ações + navegação de frame ────────── */}
+      <div className="px-4 pb-3 flex flex-col gap-2 shrink-0">
+        {/* Confirmar / Confirmar vídeo / Rejeitar — só com detecção */}
+        {detection && (
+          <div className="flex gap-2 items-stretch">
+            <button
+              onClick={onConfirmAI}
+              className="flex-1 flex items-center justify-center gap-1.5 text-sm font-semibold text-white"
+              style={{
+                background: confirmed ? "#3E8E63" : "#2F6B4F",
+                borderRadius: 10,
+                padding: "9px 12px",
+                transition: "background 0.15s",
+                ...font,
+              }}
+              onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "#3E8E63")}
+              onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = confirmed ? "#3E8E63" : "#2F6B4F")}
+            >
+              {confirmed && <Check size={13} style={{ color: "#A9E8C2" }} />}
+              Confirmar {aiPt}
+              <kbd className="text-xs rounded px-1 py-0.5" style={{ background: "rgba(255,255,255,0.2)", fontFamily: "IBM Plex Mono, monospace" }}>⏎</kbd>
+            </button>
+
+            <button
+              onClick={onConfirmVideo}
+              className="flex items-center justify-center gap-1.5 text-xs font-medium"
+              style={{
+                padding: "9px 11px", borderRadius: 10,
+                background: "#EFF6FF", color: "#2563EB",
+                border: "1.5px solid #BFDBFE",
+                transition: "background 0.15s",
+                ...font,
+              }}
+              title="Confirmar para todos os frames do vídeo (⇧⏎)"
+              onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "#DBEAFE")}
+              onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "#EFF6FF")}
+            >
+              <Film size={13} />
+              Vídeo
+              <kbd className="text-xs rounded px-1" style={{ background: "rgba(37,99,235,0.12)", fontFamily: "IBM Plex Mono, monospace" }}>⇧⏎</kbd>
+            </button>
+
+            <button
+              onClick={onReject}
+              className="flex items-center justify-center"
+              style={{
+                width: 36, flexShrink: 0,
+                borderRadius: 10,
+                border: "1.5px solid #E7DECF",
+                background: "#fff", color: "#6B6357",
+                transition: "background 0.15s, color 0.15s",
+              }}
+              title="Rejeitar sugestão da IA"
+              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = "#FEF2EF"; (e.currentTarget as HTMLElement).style.color = "#C2503A"; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = "#fff"; (e.currentTarget as HTMLElement).style.color = "#6B6357"; }}
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
+
+        {/* Navegação de frame — sempre visível */}
+        <div className="flex gap-2">
+          <button
+            onClick={onPrevFrame}
+            disabled={frameIdx <= 1}
+            className="flex items-center gap-1 px-3 py-2 text-xs font-medium rounded-xl disabled:opacity-30 disabled:cursor-not-allowed"
+            style={{ background: "#FAF6EE", border: "1.5px solid #E7DECF", color: "#221F1A", transition: "background 0.15s", ...font }}
+            onMouseEnter={(e) => { if (frameIdx > 1) (e.currentTarget as HTMLElement).style.background = "#EFE8DB"; }}
+            onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "#FAF6EE")}
+          >
+            <ChevronLeft size={13} />
+            Anterior
+          </button>
+
+          <button
+            onClick={onSkipFrame}
+            disabled={frameIdx >= totalFrames}
+            className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium rounded-xl disabled:opacity-30 disabled:cursor-not-allowed"
+            style={{ background: "#FAF6EE", border: "1.5px solid #E7DECF", color: "#6B6357", transition: "background 0.15s", ...font }}
+            onMouseEnter={(e) => { if (frameIdx < totalFrames) (e.currentTarget as HTMLElement).style.background = "#EFE8DB"; }}
+            onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "#FAF6EE")}
+          >
+            <SkipForward size={13} />
+            Pular
+            <kbd className="text-xs rounded px-1" style={{ background: "#EFE8DB", color: "#9A9080", fontFamily: "IBM Plex Mono, monospace" }}>S</kbd>
+          </button>
+
+          <button
+            onClick={onNextFrame}
+            disabled={frameIdx >= totalFrames}
+            className="flex items-center gap-1 px-3 py-2 text-xs font-medium rounded-xl disabled:opacity-30 disabled:cursor-not-allowed"
+            style={{ background: "#2F6B4F", color: "#fff", border: "none", transition: "background 0.15s", ...font }}
+            onMouseEnter={(e) => { if (frameIdx < totalFrames) (e.currentTarget as HTMLElement).style.background = "#3E8E63"; }}
+            onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "#2F6B4F")}
+          >
+            Próximo
+            <ChevronRight size={13} />
+          </button>
         </div>
       </div>
 

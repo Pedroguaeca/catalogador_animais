@@ -42,7 +42,8 @@ export type ReviewAction =
   | { type: "CLOSE_NEW_CAT" }
   | { type: "SET_NEW_CAT_NAME"; payload: string }
   | { type: "ADD_CATEGORY"; payload: string }
-  | { type: "MARK_ANNOTATED" };
+  | { type: "MARK_ANNOTATED" }
+  | { type: "CONFIRM_ALL_VIDEO"; payload: number };
 
 export interface ReviewState {
   query: string;

@@ -20,6 +20,7 @@ interface Appearance {
   individual_count: number;
   review_status:    string;
   best_crop_s3_key: string | null;
+  thumbnail_url:    string | null;
   taxonomic_path:   string | null;
   video_id?:        string;
 }
@@ -181,6 +182,38 @@ function AppearanceCard({
         </div>
         <ConfidenceDot score={app.species_score} />
       </div>
+
+      {/* Frame thumbnail */}
+      {app.thumbnail_url && (
+        <div
+          className="relative overflow-hidden rounded-xl"
+          style={{ height: 140, background: "#EFE8DB" }}
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={app.thumbnail_url}
+            alt={`Frame de ${app.species}`}
+            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+            onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+          />
+          {/* Timestamp overlay */}
+          {time !== "—" && (
+            <span
+              style={{
+                position: "absolute", bottom: 6, left: 6,
+                padding: "2px 7px", borderRadius: 6,
+                fontSize: 11, fontWeight: 600, letterSpacing: "0.01em",
+                background: "rgba(34,31,26,0.72)",
+                color: "#fff",
+                fontFamily: "IBM Plex Mono, monospace",
+                backdropFilter: "blur(4px)",
+              }}
+            >
+              {time}
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Meta chips */}
       <div className="flex flex-wrap gap-2">

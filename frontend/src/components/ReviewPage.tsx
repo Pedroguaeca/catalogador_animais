@@ -1,7 +1,6 @@
 "use client";
 
 import { useReducer, useEffect, useState, useCallback } from "react";
-import { useRouter } from "next/navigation";
 import { reviewReducer, initialState } from "../lib/reducer";
 import type { Video } from "../lib/types";
 import { TopBar } from "./TopBar";
@@ -9,7 +8,6 @@ import { FrameStage } from "./FrameStage";
 import { Filmstrip } from "./Filmstrip";
 import { IdentificationPanel } from "./IdentificationPanel";
 import { BottomBar } from "./BottomBar";
-import { UploadModal } from "./UploadModal";
 
 interface ReviewPageProps {
   videos: Video[];
@@ -21,9 +19,7 @@ export function ReviewPage({ videos }: ReviewPageProps) {
     reviewReducer,
     initialState(firstVideoId, videos[0]?.frames.length ?? 0)
   );
-  const [zoom,         setZoom]         = useState(false);
-  const [uploadOpen,   setUploadOpen]   = useState(false);
-  const router = useRouter();
+  const [zoom, setZoom] = useState(false);
 
   const currentVideo = videos.find((v) => v.id === state.videoId) ?? videos[0];
   const videoIdx = videos.findIndex((v) => v.id === state.videoId);
@@ -54,17 +50,20 @@ export function ReviewPage({ videos }: ReviewPageProps) {
     return () => window.removeEventListener("keydown", handleKey);
   }, [handleKey]);
 
+  const handleJumpToFirstUnannotated = useCallback(() => {
+    for (let i = 1; i <= totalFrames; i++) {
+      if (!state.annotatedFrames.has(i)) {
+        dispatch({ type: "SET_FRAME", payload: i });
+        return;
+      }
+    }
+  }, [state.annotatedFrames, totalFrames]);
+
   return (
     <div
-      className="flex flex-col h-screen overflow-hidden"
+      className="flex flex-col flex-1 min-h-0 overflow-hidden"
       style={{ background: "#FAF6EE", fontFamily: "IBM Plex Sans, sans-serif" }}
     >
-      {uploadOpen && (
-        <UploadModal
-          onClose={() => setUploadOpen(false)}
-          onPipelineDone={() => router.refresh()}
-        />
-      )}
       <TopBar
         videoId={state.videoId}
         videos={videos.map((v) => v.id)}
@@ -74,7 +73,7 @@ export function ReviewPage({ videos }: ReviewPageProps) {
         totalVideos={videos.length}
         annotated={state.annotated}
         onVideoChange={(id) => dispatch({ type: "SET_VIDEO", payload: id })}
-        onUpload={() => setUploadOpen(true)}
+        onJumpUnannotated={handleJumpToFirstUnannotated}
       />
 
       {/* Body */}
@@ -102,6 +101,8 @@ export function ReviewPage({ videos }: ReviewPageProps) {
           confirmed={state.confirmed}
           newCatOpen={state.newCatOpen}
           newCatName={state.newCatName}
+          frameIdx={state.frameIdx}
+          totalFrames={totalFrames}
           onQuery={(q) => dispatch({ type: "SET_QUERY", payload: q })}
           onSelect={(id) => {
             dispatch({ type: "SELECT", payload: id });
@@ -111,7 +112,11 @@ export function ReviewPage({ videos }: ReviewPageProps) {
             dispatch({ type: "CONFIRM_AI" });
             dispatch({ type: "MARK_ANNOTATED" });
           }}
+          onConfirmVideo={() => dispatch({ type: "CONFIRM_ALL_VIDEO", payload: totalFrames })}
           onReject={() => dispatch({ type: "REJECT" })}
+          onPrevFrame={() => dispatch({ type: "PREV_FRAME" })}
+          onNextFrame={() => dispatch({ type: "NEXT_FRAME" })}
+          onSkipFrame={() => dispatch({ type: "SKIP_FRAME" })}
           onOpenNewCat={() => dispatch({ type: "OPEN_NEW_CAT" })}
           onCloseNewCat={() => dispatch({ type: "CLOSE_NEW_CAT" })}
           onNewCatName={(n) => dispatch({ type: "SET_NEW_CAT_NAME", payload: n })}
@@ -123,13 +128,8 @@ export function ReviewPage({ videos }: ReviewPageProps) {
       </div>
 
       <BottomBar
-        frameIdx={state.frameIdx}
-        totalFrames={totalFrames}
         videoIdx={videoIdx}
         totalVideos={videos.length}
-        onPrevFrame={() => dispatch({ type: "PREV_FRAME" })}
-        onNextFrame={() => dispatch({ type: "NEXT_FRAME" })}
-        onSkipFrame={() => dispatch({ type: "SKIP_FRAME" })}
         onPrevVideo={() => {
           if (videoIdx > 0) dispatch({ type: "SET_VIDEO", payload: videos[videoIdx - 1].id });
         }}

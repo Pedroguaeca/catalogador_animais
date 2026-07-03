@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, UploadCloud } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 
 interface TopBarProps {
   videoId: string;
@@ -11,7 +11,7 @@ interface TopBarProps {
   totalVideos: number;
   annotated: number;
   onVideoChange: (id: string) => void;
-  onUpload: () => void;
+  onJumpUnannotated: () => void;
 }
 
 export function TopBar({
@@ -23,54 +23,15 @@ export function TopBar({
   totalVideos,
   annotated,
   onVideoChange,
-  onUpload,
+  onJumpUnannotated,
 }: TopBarProps) {
   const progress = totalFrames > 0 ? (annotated / totalFrames) * 100 : 0;
 
   return (
     <header
       className="flex items-center justify-between px-5 border-b bg-white shrink-0"
-      style={{ height: 60 }}
+      style={{ height: 52 }}
     >
-      {/* Logo + título + upload */}
-      <div className="flex items-center gap-3">
-        <div
-          className="flex items-center justify-center text-white font-bold text-xs"
-          style={{
-            width: 30,
-            height: 30,
-            background: "#2F6B4F",
-            borderRadius: 9,
-            boxShadow: "0 0 0 2px #fff, 0 0 0 3.5px #2F6B4F",
-            fontFamily: "Libre Franklin, sans-serif",
-          }}
-        >
-          S
-        </div>
-        <span
-          className="font-semibold text-sm tracking-tight"
-          style={{ color: "#221F1A", fontFamily: "IBM Plex Sans, sans-serif" }}
-        >
-          SIAB{" "}
-          <span style={{ color: "#9A9080", fontWeight: 400 }}>/ Revisão</span>
-        </span>
-        <button
-          onClick={onUpload}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-xl transition-colors"
-          style={{
-            background: "#EEF5F0",
-            border: "1.5px solid #CDE3D6",
-            color: "#2F6B4F",
-            fontFamily: "IBM Plex Sans, sans-serif",
-          }}
-          onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "#CDE3D6")}
-          onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "#EEF5F0")}
-        >
-          <UploadCloud size={13} />
-          Adicionar vídeos
-        </button>
-      </div>
-
       {/* Seletor de vídeo */}
       <div className="relative">
         <select
@@ -119,12 +80,20 @@ export function TopBar({
           </span>
           /{totalVideos}
         </span>
-        <span
-          className="text-xs font-semibold"
-          style={{ color: "#2F8F4E", fontFamily: "IBM Plex Sans, sans-serif" }}
+        <button
+          onClick={onJumpUnannotated}
+          title="Ir para o primeiro frame não anotado"
+          className="text-xs font-semibold transition-colors"
+          style={{
+            color: "#2F8F4E", fontFamily: "IBM Plex Sans, sans-serif",
+            background: "none", border: "none", cursor: "pointer",
+            padding: "2px 6px", borderRadius: 6,
+          }}
+          onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "#EEF5F0")}
+          onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "none")}
         >
           {annotated} anotados
-        </span>
+        </button>
         {/* Barra de progresso */}
         <div
           className="rounded-full overflow-hidden"

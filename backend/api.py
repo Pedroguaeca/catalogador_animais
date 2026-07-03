@@ -175,6 +175,27 @@ def _ts_parts(ts: str | None) -> tuple[str, str]:
         return "", ""
 
 
+def _presigned_url(s3_key: str | None, expiry: int = 3600) -> str | None:
+    """Gera presigned URL para leitura de um objeto S3. Retorna None se key ausente ou falha."""
+    if not s3_key:
+        return None
+    # Normaliza: remove prefixo s3://bucket/ se presente
+    key = str(s3_key)
+    if key.startswith("s3://"):
+        parts = key[5:].split("/", 1)
+        key = parts[1] if len(parts) > 1 else ""
+    if not key:
+        return None
+    try:
+        return _s3_client().generate_presigned_url(
+            "get_object",
+            Params={"Bucket": BUCKET, "Key": key},
+            ExpiresIn=expiry,
+        )
+    except Exception:
+        return None
+
+
 # ── Endpoint 1 — Upload de vídeo ──────────────────────────────────────────────
 
 
@@ -271,10 +292,15 @@ def list_appearances(
     items.sort(key=lambda a: a.get("ts_start") or "9999")
     items = items[:limit]
 
+    def _enrich(a: dict) -> dict:
+        cleaned = _clean(a)
+        cleaned["thumbnail_url"] = _presigned_url(a.get("best_crop_s3_key"))
+        return cleaned
+
     return {
         "project_id": project_id,
         "count":      len(items),
-        "items":      [_clean(a) for a in items],
+        "items":      [_enrich(a) for a in items],
     }
 
 

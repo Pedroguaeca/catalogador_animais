@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { UploadCloud, ClipboardList, Download, LayoutGrid, BarChart2 } from "lucide-react";
+import { UploadCloud, ClipboardList, Download, LayoutGrid, BarChart2, PlusCircle } from "lucide-react";
 
 const links = [
   { href: "/",          label: "Anotação",   icon: LayoutGrid },
@@ -61,6 +61,26 @@ export function SiabNav() {
           );
         })}
       </nav>
+
+      <div style={{ flex: 1 }} />
+
+      <Link
+        href="/upload"
+        style={{
+          display: "flex", alignItems: "center", gap: 6,
+          padding: "6px 12px", borderRadius: 10, textDecoration: "none",
+          fontSize: 13, fontWeight: 500,
+          color: "#2F6B4F", background: "#EEF5F0",
+          border: "1.5px solid #CDE3D6",
+          fontFamily: "IBM Plex Sans, sans-serif",
+          transition: "background 0.15s",
+        }}
+        onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "#CDE3D6")}
+        onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "#EEF5F0")}
+      >
+        <PlusCircle size={14} />
+        Adicionar vídeos
+      </Link>
     </header>
   );
 }
