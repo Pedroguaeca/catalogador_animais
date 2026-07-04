@@ -139,12 +139,6 @@ export default function LoginPage() {
           Entrar com Google
         </button>
 
-        <a
-          href={`https://siab-auth.auth.us-east-1.amazoncognito.com/forgotPassword?client_id=${process.env.NEXT_PUBLIC_COGNITO_CLIENT_ID}`}
-          style={{ color: "#9A9080", fontSize: 13, textAlign: "center", textDecoration: "none" }}
-        >
-          Esqueci minha senha
-        </a>
       </div>
     </div>
   );
