@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { UploadCloud, ClipboardList, Download, LayoutGrid, BarChart2, PlusCircle } from "lucide-react";
+import { UploadCloud, ClipboardList, Download, LayoutGrid, BarChart2, PlusCircle, LogOut } from "lucide-react";
+import { useSession, signOut } from "next-auth/react";
 
 const links = [
   { href: "/",          label: "Anotação",   icon: LayoutGrid },
@@ -14,6 +15,8 @@ const links = [
 
 export function SiabNav() {
   const pathname = usePathname();
+  const { data: session } = useSession();
+  const displayName = session?.user?.name ?? session?.user?.email ?? null;
 
   return (
     <header
@@ -63,6 +66,43 @@ export function SiabNav() {
       </nav>
 
       <div style={{ flex: 1 }} />
+
+      {/* Identidade do utilizador + logout */}
+      {displayName && (
+        <span style={{
+          fontSize: 12, color: "#9A9080",
+          fontFamily: "IBM Plex Sans, sans-serif",
+          maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        }}>
+          {displayName}
+        </span>
+      )}
+
+      <button
+        onClick={() => signOut({ callbackUrl: "/login" })}
+        title="Sair"
+        style={{
+          display: "flex", alignItems: "center", gap: 5,
+          padding: "6px 10px", borderRadius: 10,
+          fontSize: 13, fontWeight: 500, cursor: "pointer",
+          color: "#9A6B6B", background: "transparent", border: "none",
+          fontFamily: "IBM Plex Sans, sans-serif",
+          transition: "background 0.15s, color 0.15s",
+        }}
+        onMouseEnter={(e) => {
+          (e.currentTarget as HTMLElement).style.background = "#FBF0F0";
+          (e.currentTarget as HTMLElement).style.color = "#C0392B";
+        }}
+        onMouseLeave={(e) => {
+          (e.currentTarget as HTMLElement).style.background = "transparent";
+          (e.currentTarget as HTMLElement).style.color = "#9A6B6B";
+        }}
+      >
+        <LogOut size={14} />
+        Sair
+      </button>
+
+      <div style={{ width: 1, height: 22, background: "#E7DECF" }} />
 
       <Link
         href="/upload"
