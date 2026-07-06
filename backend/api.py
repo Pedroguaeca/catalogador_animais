@@ -6,8 +6,6 @@ Endpoints:
     GET    /projects/{project_id}/appearances         — lista aparições com filtros
     PATCH  /appearances/{appearance_id}/review        — revisão humana de aparição
     GET    /projects/{project_id}/appearances/export  — CSV exportação
-
-Tenant fixo para MVP: "consultoria-teste" (sem Cognito).
 """
 
 from __future__ import annotations
@@ -18,6 +16,7 @@ import json
 import logging
 import os
 import tempfile
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -25,9 +24,10 @@ from typing import Literal
 
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from jose import ExpiredSignatureError, JWTError, jwk, jwt
 from pydantic import BaseModel
 
 from pipeline.ocr import VideoMetadata, extract_video_metadata
@@ -36,13 +36,26 @@ logger = logging.getLogger(__name__)
 
 # ── Configuração ───────────────────────────────────────────────────────────────
 
-TENANT_ID               = os.environ.get("SIAB_TENANT",              "consultoria-teste")
+_DEFAULT_TENANT         = os.environ.get("SIAB_TENANT",              "consultoria-teste")
 BUCKET                  = os.environ.get("SIAB_BUCKET",              "siab-media-dev")
 APPEARANCES_TABLE       = os.environ.get("APPEARANCES_TABLE",        "siab-appearances")
 REVIEWS_TABLE           = os.environ.get("REVIEWS_TABLE",            "siab-reviews")
 FRAME_ANNOTATIONS_TABLE = os.environ.get("FRAME_ANNOTATIONS_TABLE",  "siab-frame-annotations")
+CAMERAS_TABLE           = os.environ.get("CAMERAS_TABLE",            "siab-cameras")
 VIDEOS_QUEUE_NAME       = os.environ.get("VIDEOS_QUEUE_NAME",        "siab-videos")
 AWS_REGION              = os.environ.get("AWS_DEFAULT_REGION",       "us-east-1")
+
+# Cognito — obrigatório em produção; ausente = modo dev (sem validação de assinatura)
+_USER_POOL_ID    = os.environ.get("COGNITO_USER_POOL_ID",    "us-east-1_muBMGRYkB")
+_APP_CLIENT_ID   = os.environ.get("COGNITO_APP_CLIENT_ID",   "50pl8rj5st1l9bt1eb8h5csqud")
+_COGNITO_ISSUER  = f"https://cognito-idp.{AWS_REGION}.amazonaws.com/{_USER_POOL_ID}"
+_JWKS_URL        = f"{_COGNITO_ISSUER}/.well-known/jwks.json"
+
+# SIAB_JWT_VALIDATION=off desabilita verificação de assinatura (dev local sem Cognito)
+_JWT_VALIDATION  = os.environ.get("SIAB_JWT_VALIDATION", "on").lower() != "off"
+
+# Cache em memória das chaves públicas Cognito (recarregado ao encontrar kid desconhecido)
+_jwks_cache: dict[str, dict] = {}   # kid → JWK dict
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
@@ -81,6 +94,10 @@ def _frame_annotations_table():
     return boto3.resource("dynamodb", region_name=AWS_REGION).Table(FRAME_ANNOTATIONS_TABLE)
 
 
+def _cameras_table():
+    return boto3.resource("dynamodb", region_name=AWS_REGION).Table(CAMERAS_TABLE)
+
+
 # ── Schemas ────────────────────────────────────────────────────────────────────
 
 
@@ -94,6 +111,147 @@ class AnnotationRequest(BaseModel):
     frame_path:        str
     annotated_species: str
     annotation_source: Literal["ai_confirm", "chip_select", "new_category"]
+
+
+class CameraCreate(BaseModel):
+    camera_id: str
+    name:      str | None = None
+    latitude:  float | None = None
+    longitude: float | None = None
+
+
+class CameraUpdate(BaseModel):
+    name:      str | None = None
+    latitude:  float | None = None
+    longitude: float | None = None
+
+
+# ── Auth ───────────────────────────────────────────────────────────────────────
+
+
+def _load_jwks(force: bool = False) -> None:
+    """Busca as chaves públicas JWKS do Cognito e popula _jwks_cache (kid → JWK)."""
+    global _jwks_cache
+    if _jwks_cache and not force:
+        return
+    try:
+        with urllib.request.urlopen(_JWKS_URL, timeout=5) as resp:
+            data = json.loads(resp.read())
+        _jwks_cache = {k["kid"]: k for k in data.get("keys", [])}
+        logger.info("JWKS carregadas: %d chaves", len(_jwks_cache))
+    except Exception as exc:
+        logger.error("Falha ao carregar JWKS de %s: %s", _JWKS_URL, exc)
+
+
+def _verify_jwt(token: str) -> dict:
+    """Valida JWT Cognito: assinatura RS256, issuer, audience, expiração, token_use.
+
+    Raises HTTPException(401) em qualquer falha de validação.
+    Returns o payload decodificado e verificado.
+    """
+    if not _JWT_VALIDATION:
+        # Modo dev: decodifica sem verificar (apenas quando SIAB_JWT_VALIDATION=off)
+        import base64 as _b64
+        payload_b64 = token.split(".")[1]
+        pad = (4 - len(payload_b64) % 4) % 4
+        return json.loads(_b64.b64decode(payload_b64 + "=" * pad))
+
+    try:
+        header = jwt.get_unverified_header(token)
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Token malformado.")
+
+    kid = header.get("kid", "")
+    if kid not in _jwks_cache:
+        _load_jwks(force=True)
+    if kid not in _jwks_cache:
+        raise HTTPException(status_code=401, detail="Chave de assinatura desconhecida.")
+
+    try:
+        public_key = jwk.construct(_jwks_cache[kid])
+        payload = jwt.decode(
+            token,
+            public_key,
+            algorithms=["RS256"],
+            audience=_APP_CLIENT_ID,
+            issuer=_COGNITO_ISSUER,
+            options={"verify_at_hash": False},
+        )
+    except ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expirado.")
+    except JWTError as exc:
+        raise HTTPException(status_code=401, detail=f"Token inválido: {exc}")
+
+    if payload.get("token_use") not in ("id", "access"):
+        raise HTTPException(status_code=401, detail="token_use inválido.")
+
+    return payload
+
+
+def _jwt_payload(authorization: str | None) -> dict | None:
+    """Valida o JWT do header Authorization.
+
+    - Header ausente + validação ON  → HTTPException(401)   [produção]
+    - Header ausente + validação OFF → retorna None          [dev local]
+    - Token presente, inválido       → HTTPException(401)   [sempre]
+    - Token presente, válido         → retorna payload       [sempre]
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        if _JWT_VALIDATION:
+            raise HTTPException(status_code=401, detail="Authorization header ausente.")
+        return None  # dev local: sem token → fallback
+    return _verify_jwt(authorization[7:])
+
+
+def get_current_tenant(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> str:
+    """Extrai custom:tenant_id do JWT Cognito verificado.
+    Em produção (JWT_VALIDATION=on), header ausente resulta em 401."""
+    payload = _jwt_payload(authorization)
+    if payload is None:
+        return _DEFAULT_TENANT  # só alcançável em dev (JWT_VALIDATION=off)
+    tid = payload.get("custom:tenant_id")
+    if not tid:
+        raise HTTPException(status_code=401, detail="custom:tenant_id ausente no token.")
+    return str(tid)
+
+
+def get_current_role(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> str:
+    """Extrai custom:role do JWT Cognito verificado.
+    Em produção (JWT_VALIDATION=on), header ausente resulta em 401."""
+    payload = _jwt_payload(authorization)
+    if payload is None:
+        return "analyst"  # só alcançável em dev (JWT_VALIDATION=off)
+    return str(payload.get("custom:role", "analyst"))
+
+
+def get_current_sub(
+    authorization: str | None = Header(default=None, alias="Authorization"),
+) -> str:
+    """Extrai o sub (user ID) do JWT Cognito verificado."""
+    payload = _jwt_payload(authorization)
+    if payload is None:
+        return "anonymous"
+    return str(payload.get("sub", "anonymous"))
+
+
+def require_role(*allowed_roles: str):
+    """Factory de dependência FastAPI para autorização por papel.
+
+    Usage:
+        @app.post("/path", dependencies=[Depends(require_role("approver", "admin"))])
+    """
+    def dependency(role: str = Depends(get_current_role)) -> str:
+        if role not in allowed_roles:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Permissão insuficiente. Necessário: {list(allowed_roles)}. Actual: {role}",
+            )
+        return role
+    return dependency
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -176,6 +334,50 @@ def _fauna_group(taxonomic_path: str | None) -> str:
     return "Fauna"
 
 
+# Curated genus → dashboard group. Covers common Brazilian/Pan-Tropical taxa.
+# Incomplete by design — unlisted genera fall to "outros". Expand as needed.
+_GENUS_GROUP: dict[str, str] = {
+    # Mastofauna
+    "dasyprocta": "mastofauna", "cuniculus": "mastofauna", "mazama": "mastofauna",
+    "tamandua": "mastofauna", "myrmecophaga": "mastofauna", "puma": "mastofauna",
+    "panthera": "mastofauna", "leopardus": "mastofauna", "nasua": "mastofauna",
+    "procyon": "mastofauna", "eira": "mastofauna", "tayassu": "mastofauna",
+    "pecari": "mastofauna", "tapirus": "mastofauna", "cerdocyon": "mastofauna",
+    "chrysocyon": "mastofauna", "didelphis": "mastofauna", "hydrochoerus": "mastofauna",
+    "dasypus": "mastofauna", "cabassous": "mastofauna", "bradypus": "mastofauna",
+    "choloepus": "mastofauna", "alouatta": "mastofauna", "cebus": "mastofauna",
+    "sapajus": "mastofauna", "callicebus": "mastofauna", "callithrix": "mastofauna",
+    "speothos": "mastofauna",
+    # Avifauna
+    "psophia": "avifauna", "crax": "avifauna", "penelope": "avifauna",
+    "crypturellus": "avifauna", "tinamus": "avifauna", "pteroglossus": "avifauna",
+    "ramphastos": "avifauna", "ara": "avifauna", "amazona": "avifauna",
+    "mitu": "avifauna", "ortalis": "avifauna", "pauxi": "avifauna",
+    # Herpetofauna (répteis + anfíbios)
+    "caiman": "herpetofauna", "melanosuchus": "herpetofauna", "paleosuchus": "herpetofauna",
+    "eunectes": "herpetofauna", "boa": "herpetofauna", "corallus": "herpetofauna",
+    "tupinambis": "herpetofauna", "iguana": "herpetofauna", "chelonoidis": "herpetofauna",
+    "podocnemis": "herpetofauna", "rhinella": "herpetofauna", "leptodactylus": "herpetofauna",
+}
+
+
+def _fauna_group_dash(taxonomic_path: str | None, species: str | None = None) -> str:
+    """Grupo de fauna para o dashboard: mastofauna / avifauna / herpetofauna / outros.
+
+    Prioridade: palavras-chave na taxonomic_path → tabela de gêneros curada → 'outros'.
+    """
+    if taxonomic_path:
+        p = taxonomic_path.lower()
+        if "mammalia" in p:
+            return "mastofauna"
+        if "aves" in p:
+            return "avifauna"
+        if "reptilia" in p or "amphibia" in p:
+            return "herpetofauna"
+    genus = (species or "").strip().lower().split()[0] if species else ""
+    return _GENUS_GROUP.get(genus, "outros")
+
+
 def _ts_parts(ts: str | None) -> tuple[str, str]:
     """Separa ts_start ISO em (data DD/MM/YYYY, horário HH:MM:SS)."""
     if not ts or len(ts) < 19:
@@ -226,6 +428,29 @@ def _appearances_for_frame(video_id: str, frame_idx: int, tenant_id: str) -> lis
     ]
 
 
+def _ensure_camera(tenant_id: str, project_id: str, camera_id: str) -> bool:
+    """Cria câmera provisória se ainda não existir. Retorna True se foi criada agora."""
+    tbl = _cameras_table()
+    try:
+        tbl.put_item(
+            Item={
+                "tenant_id":          tenant_id,
+                "project_id#camera_id": f"{project_id}#{camera_id}",
+                "project_id":         project_id,
+                "camera_id":          camera_id,
+                "created_at":         datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+            },
+            ConditionExpression="attribute_not_exists(#sk)",
+            ExpressionAttributeNames={"#sk": "project_id#camera_id"},
+        )
+        return True
+    except tbl.meta.client.exceptions.ConditionalCheckFailedException:
+        return False
+    except Exception as exc:
+        logger.warning("_ensure_camera falhou para %s/%s/%s: %s", tenant_id, project_id, camera_id, exc)
+        return False
+
+
 def _check_discrepancy(appearance_id: str, app_sk: str, tenant_id: str) -> None:
     """Flagga uma aparição quando suas anotações de frame divergem de espécie."""
     app_tbl = _appearances_table()
@@ -266,9 +491,12 @@ def _check_discrepancy(appearance_id: str, app_sk: str, tenant_id: str) -> None:
 
 
 @app.post("/projects/{project_id}/videos/upload")
-async def upload_video(project_id: str, file: UploadFile = File(...)):
+async def upload_video(
+    project_id: str,
+    file: UploadFile = File(...),
+    tenant_id: str = Depends(get_current_tenant),
+):
     """Faz upload de vídeo, roda OCR, publica na fila siab-videos."""
-    tenant_id = TENANT_ID
     video_id  = str(uuid.uuid4())
 
     ext       = os.path.splitext(file.filename or "video.avi")[1].lower() or ".avi"
@@ -309,16 +537,24 @@ async def upload_video(project_id: str, file: UploadFile = File(...)):
     sqs.send_message(
         QueueUrl=queue_url,
         MessageBody=json.dumps({
-            "video_s3_key": s3_key,
-            "tenant_id":    tenant_id,
-            "project_id":   project_id,
-            "video_id":     video_id,
+            "video_s3_key":  s3_key,
+            "tenant_id":     tenant_id,
+            "project_id":    project_id,
+            "video_id":      video_id,
+            "camera_id":     meta.camera_id,
+            "captured_at":   meta.captured_at,
+            "temperature_c": meta.temperature_c,
         }),
     )
 
+    camera_is_new = False
+    if meta.camera_id:
+        camera_is_new = _ensure_camera(tenant_id, project_id, meta.camera_id)
+
     logger.info(
-        "Vídeo enviado | tenant=%s project=%s video_id=%s camera=%s ts=%s source=%s",
-        tenant_id, project_id, video_id, meta.camera_id, meta.captured_at, meta.location_source,
+        "Vídeo enviado | tenant=%s project=%s video_id=%s camera=%s ts=%s source=%s camera_is_new=%s",
+        tenant_id, project_id, video_id, meta.camera_id, meta.captured_at,
+        meta.location_source, camera_is_new,
     )
 
     return {
@@ -327,10 +563,126 @@ async def upload_video(project_id: str, file: UploadFile = File(...)):
         "camera_id":       meta.camera_id,
         "captured_at":     meta.captured_at,
         "location_source": meta.location_source,
+        "camera_is_new":   camera_is_new,
     }
 
 
-# ── Endpoint 2 — Listar aparições ─────────────────────────────────────────────
+# ── Endpoints 2-4 — Câmeras ───────────────────────────────────────────────────
+
+
+@app.post("/projects/{project_id}/cameras", status_code=201)
+def create_camera(
+    project_id: str,
+    body: CameraCreate,
+    tenant_id: str = Depends(get_current_tenant),
+):
+    """Cria uma câmera no projeto. 409 se camera_id já existir."""
+    tbl  = _cameras_table()
+    item = {
+        "tenant_id":            tenant_id,
+        "project_id#camera_id": f"{project_id}#{body.camera_id}",
+        "project_id":           project_id,
+        "camera_id":            body.camera_id,
+        "created_at":           datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    if body.name is not None:
+        item["name"] = body.name
+    if body.latitude is not None:
+        item["latitude"] = Decimal(str(body.latitude))
+    if body.longitude is not None:
+        item["longitude"] = Decimal(str(body.longitude))
+
+    try:
+        tbl.put_item(
+            Item=item,
+            ConditionExpression="attribute_not_exists(#sk)",
+            ExpressionAttributeNames={"#sk": "project_id#camera_id"},
+        )
+    except tbl.meta.client.exceptions.ConditionalCheckFailedException:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Câmera '{body.camera_id}' já existe no projeto '{project_id}'.",
+        )
+
+    return _clean(item)
+
+
+@app.get("/projects/{project_id}/cameras")
+def list_cameras(
+    project_id: str,
+    tenant_id: str = Depends(get_current_tenant),
+):
+    """Lista todas as câmeras do projeto."""
+    tbl   = _cameras_table()
+    items: list[dict] = []
+    kwargs: dict = {
+        "KeyConditionExpression": (
+            Key("tenant_id").eq(tenant_id)
+            & Key("project_id#camera_id").begins_with(f"{project_id}#")
+        ),
+    }
+    while True:
+        resp = tbl.query(**kwargs)
+        items.extend(resp.get("Items", []))
+        lek = resp.get("LastEvaluatedKey")
+        if not lek:
+            break
+        kwargs["ExclusiveStartKey"] = lek
+
+    return {"project_id": project_id, "count": len(items), "items": _clean(items)}
+
+
+@app.patch("/projects/{project_id}/cameras/{camera_id}")
+def update_camera(
+    project_id: str,
+    camera_id: str,
+    body: CameraUpdate,
+    tenant_id: str = Depends(get_current_tenant),
+):
+    """Atualiza name/latitude/longitude de uma câmera existente."""
+    tbl = _cameras_table()
+    key = {
+        "tenant_id":            tenant_id,
+        "project_id#camera_id": f"{project_id}#{camera_id}",
+    }
+
+    if tbl.get_item(Key=key).get("Item") is None:
+        raise HTTPException(status_code=404, detail=f"Câmera '{camera_id}' não encontrada.")
+
+    set_parts, names, values = [], {}, {}
+    if body.name is not None:
+        set_parts.append("#n = :name")
+        names[":name"] = body.name
+        names["#n"]    = "name"
+    if body.latitude is not None:
+        set_parts.append("latitude = :lat")
+        values[":lat"] = Decimal(str(body.latitude))
+    if body.longitude is not None:
+        set_parts.append("longitude = :lon")
+        values[":lon"] = Decimal(str(body.longitude))
+
+    if not set_parts:
+        raise HTTPException(status_code=422, detail="Nenhum campo para atualizar.")
+
+    # Merge names dict (expression attribute names) into values dict — DynamoDB SDK expects them separate
+    expr_names  = {k: v for k, v in names.items() if k.startswith("#")}
+    expr_values = {k: v for k, v in names.items() if k.startswith(":")}
+    expr_values.update(values)
+
+    kwargs: dict = {
+        "Key":              key,
+        "UpdateExpression": "SET " + ", ".join(set_parts),
+        "ExpressionAttributeValues": expr_values,
+        "ReturnValues": "ALL_NEW",
+    }
+    if expr_names:
+        kwargs["ExpressionAttributeNames"] = expr_names
+
+    resp = tbl.update_item(**kwargs)
+    return _clean(resp.get("Attributes", {}))
+
+
+# ── Endpoint 5 — Listar aparições ─────────────────────────────────────────────
 
 
 @app.get("/projects/{project_id}/appearances")
@@ -340,9 +692,9 @@ def list_appearances(
     species:       str | None = Query(default=None),
     review_status: str | None = Query(default=None),
     limit:         int        = Query(default=100, ge=1, le=1000),
+    tenant_id:     str        = Depends(get_current_tenant),
 ):
     """Lista aparições do projeto, ordenadas por ts_start. Filtros opcionais."""
-    tenant_id = TENANT_ID
     table     = _appearances_table()
     items     = _appearances_from_project(table, tenant_id, project_id)
 
@@ -374,9 +726,13 @@ def list_appearances(
 
 
 @app.patch("/appearances/{appearance_id}/review")
-def review_appearance(appearance_id: str, body: ReviewRequest):
-    """Grava revisão e atualiza review_status da aparição."""
-    tenant_id   = TENANT_ID
+def review_appearance(
+    appearance_id: str,
+    body: ReviewRequest,
+    tenant_id:   str = Depends(get_current_tenant),
+    reviewer_id: str = Depends(get_current_sub),
+):
+    """Grava revisão e atualiza review_status + reviewer_id da aparição."""
     app_tbl     = _appearances_table()
     rev_tbl     = _reviews_table()
     reviewed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
@@ -393,7 +749,7 @@ def review_appearance(appearance_id: str, body: ReviewRequest):
         else str(app_item.get("species", ""))
     )
 
-    # Grava revisão em siab-reviews
+    # Grava revisão em siab-reviews (com reviewer_id para rastreabilidade)
     review_record: dict = {
         "tenant_id":                tenant_id,
         "appearance_id#reviewed_at": f"{appearance_id}#{reviewed_at}",
@@ -401,17 +757,19 @@ def review_appearance(appearance_id: str, body: ReviewRequest):
         "project_id":               project_id,
         "action":                   body.action,
         "reviewed_at":              reviewed_at,
+        "reviewer_id":              reviewer_id,
     }
     if body.corrected_species:
         review_record["corrected_species"] = body.corrected_species
     rev_tbl.put_item(Item=review_record)
 
-    # Atualiza siab-appearances
-    update_expr  = "SET review_status = :rs, #tr = :tr"
+    # Atualiza siab-appearances (inclui reviewer_id para auditoria inline)
+    update_expr  = "SET review_status = :rs, #tr = :tr, reviewer_id = :rv"
     expr_names   = {"#tr": "tenant_id#review_status"}
     expr_vals: dict = {
         ":rs": new_status,
         ":tr": f"{tenant_id}#{new_status}",
+        ":rv": reviewer_id,
     }
     if body.action == "correct" and body.corrected_species:
         update_expr += ", species = :sp, #sa = :sa"
@@ -434,9 +792,11 @@ def review_appearance(appearance_id: str, body: ReviewRequest):
 
 
 @app.patch("/frames/annotation")
-def annotate_frame(body: AnnotationRequest):
+def annotate_frame(
+    body: AnnotationRequest,
+    tenant_id: str = Depends(get_current_tenant),
+):
     """Persiste anotação de espécie por frame e verifica discrepâncias nas aparições."""
-    tenant_id    = TENANT_ID
     frame_idx    = _frame_idx_from_path(body.frame_path)
     frame_s3_key = f"{tenant_id}/frames/{body.frame_path}"
     annotated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
@@ -469,9 +829,11 @@ def annotate_frame(body: AnnotationRequest):
 
 
 @app.get("/appearances/{appearance_id}/frame-annotations")
-def get_frame_annotations(appearance_id: str):
+def get_frame_annotations(
+    appearance_id: str,
+    tenant_id: str = Depends(get_current_tenant),
+):
     """Retorna as anotações de frame de uma aparição, ordenadas por frame_idx."""
-    tenant_id = TENANT_ID
     app_tbl   = _appearances_table()
     ann_tbl   = _frame_annotations_table()
     app_item  = _find_appearance(app_tbl, tenant_id, appearance_id)
@@ -500,13 +862,130 @@ def get_frame_annotations(appearance_id: str):
     }
 
 
+# ── Endpoint 6 — Dashboard stats ─────────────────────────────────────────────
+
+
+@app.get("/projects/{project_id}/stats")
+def get_project_stats(
+    project_id: str,
+    tenant_id: str = Depends(get_current_tenant),
+):
+    """Agrega aparições confirmadas de um projeto para o dashboard."""
+    from collections import defaultdict
+
+    table     = _appearances_table()
+    pk        = f"{tenant_id}#confirmed"
+    sk_prefix = f"{project_id}#"
+
+    items: list[dict] = []
+    kwargs: dict = {
+        "IndexName": "by-review-status",
+        "KeyConditionExpression": (
+            Key("tenant_id#review_status").eq(pk)
+            & Key("project_id#appearance_id").begins_with(sk_prefix)
+        ),
+    }
+    while True:
+        resp = table.query(**kwargs)
+        items.extend(resp.get("Items", []))
+        lek = resp.get("LastEvaluatedKey")
+        if not lek:
+            break
+        kwargs["ExclusiveStartKey"] = lek
+
+    if not items:
+        return {
+            "total_confirmed": 0,
+            "distinct_species": 0,
+            "active_cameras": 0,
+            "period_start": None,
+            "period_end": None,
+            "by_fauna_group_and_month": [],
+            "by_camera": [],
+            "species_richness": [],
+        }
+
+    distinct_species = len({a.get("species") for a in items if a.get("species")})
+    active_cameras   = len({a.get("camera_id") for a in items if a.get("camera_id")})
+
+    ts_starts = sorted(a["ts_start"] for a in items if a.get("ts_start"))
+    ts_ends   = sorted(a["ts_end"]   for a in items if a.get("ts_end"))
+    period_start = ts_starts[0][:10]  if ts_starts else None
+    period_end   = ts_ends[-1][:10]   if ts_ends   else (ts_starts[-1][:10] if ts_starts else None)
+
+    # ── Fauna × mês ───────────────────────────────────────────────────────────
+    month_groups: dict[str, dict[str, int]] = defaultdict(
+        lambda: {"mastofauna": 0, "avifauna": 0, "herpetofauna": 0}
+    )
+    for a in items:
+        month = (a.get("ts_start") or "")[:7]
+        if not month:
+            continue
+        grp = _fauna_group_dash(a.get("taxonomic_path"), a.get("species"))
+        if grp in ("mastofauna", "avifauna", "herpetofauna"):
+            month_groups[month][grp] += 1
+
+    by_fauna_group_and_month = [
+        {"month": m, **v}
+        for m, v in sorted(month_groups.items())
+    ]
+
+    # ── Por câmera ────────────────────────────────────────────────────────────
+    cam_totals:  dict[str, int]            = defaultdict(int)
+    cam_species: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for a in items:
+        cam = a.get("camera_id") or "Desconhecida"
+        sp  = a.get("species") or ""
+        cam_totals[cam] += 1
+        if sp:
+            cam_species[cam][sp] += 1
+
+    by_camera = [
+        {
+            "camera_id":   cam,
+            "total":       cam_totals[cam],
+            "top_species": sorted(cam_species[cam], key=lambda s: -cam_species[cam][s])[:3],
+        }
+        for cam in sorted(cam_totals, key=lambda c: -cam_totals[c])
+    ]
+
+    # ── Riqueza de espécies ───────────────────────────────────────────────────
+    sp_data: dict[str, dict] = {}
+    for a in items:
+        sp = a.get("species") or ""
+        if not sp:
+            continue
+        if sp not in sp_data:
+            sp_data[sp] = {
+                "species": sp,
+                "group":   _fauna_group_dash(a.get("taxonomic_path"), sp),
+                "count":   0,
+            }
+        sp_data[sp]["count"] += 1
+
+    species_richness = sorted(sp_data.values(), key=lambda x: -x["count"])
+
+    return {
+        "total_confirmed":          len(items),
+        "distinct_species":         distinct_species,
+        "active_cameras":           active_cameras,
+        "period_start":             period_start,
+        "period_end":               period_end,
+        "by_fauna_group_and_month": by_fauna_group_and_month,
+        "by_camera":                by_camera,
+        "species_richness":         species_richness,
+    }
+
+
 # ── Endpoint 7 — Export CSV ───────────────────────────────────────────────────
 
 
 @app.get("/projects/{project_id}/appearances/export")
-def export_appearances(project_id: str):
+def export_appearances(
+    project_id: str,
+    tenant_id: str = Depends(get_current_tenant),
+):
     """Exporta aparições confirmadas em CSV (formato do formulário manual)."""
-    tenant_id = TENANT_ID
     table     = _appearances_table()
     items     = _appearances_from_project(table, tenant_id, project_id)
     confirmed = [a for a in items if a.get("review_status") == "confirmed"]
