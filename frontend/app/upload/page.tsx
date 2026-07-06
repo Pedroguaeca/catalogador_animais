@@ -4,7 +4,9 @@ import { useCallback, useRef, useState } from "react";
 import {
   UploadCloud, CheckCircle2, XCircle, Loader2, Camera, Clock, MapPin, X,
 } from "lucide-react";
+import { useSession } from "next-auth/react";
 import { SiabNav } from "../../src/components/SiabNav";
+import { API_BASE } from "../../src/lib/api";
 
 const PROJECTS = ["projeto-junho-2026"];
 const ACCEPT   = ".avi,.mp4,.mov,.mkv";
@@ -44,6 +46,9 @@ function toItems(files: File[]): FileItem[] {
 
 export default function UploadPage() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const { data: session } = useSession();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const idToken = (session as any)?.idToken as string | undefined;
 
   const [project,  setProject]  = useState(PROJECTS[0]);
   const [items,    setItems]    = useState<FileItem[]>([]);
@@ -71,7 +76,7 @@ export default function UploadPage() {
   const patch = (id: string, update: Partial<FileItem>) =>
     setItems((prev) => prev.map((i) => (i.id === id ? { ...i, ...update } : i)));
 
-  const uploadOne = (item: FileItem): Promise<void> =>
+  const uploadOne = (item: FileItem, token: string | undefined): Promise<void> =>
     new Promise((resolve) => {
       patch(item.id, { status: "uploading", progress: 0 });
 
@@ -92,10 +97,11 @@ export default function UploadPage() {
         resolve();
       };
       xhr.onerror = () => {
-        patch(item.id, { status: "error", error: "Erro de rede — verifique se a API está rodando em :8000." });
+        patch(item.id, { status: "error", error: "Erro de rede — tente novamente." });
         resolve();
       };
-      xhr.open("POST", `/api/v1/projects/${project}/videos/upload`);
+      xhr.open("POST", `${API_BASE}/projects/${project}/videos/upload`);
+      if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
       xhr.send(form);
     });
 
@@ -104,7 +110,7 @@ export default function UploadPage() {
     if (!pending.length) return;
     setRunning(true);
     for (const item of pending) {
-      await uploadOne(item);
+      await uploadOne(item, idToken);
     }
     setRunning(false);
   };
