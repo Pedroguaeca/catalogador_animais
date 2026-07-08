@@ -2,7 +2,7 @@
 
 import { useCallback, useRef, useState } from "react";
 import {
-  UploadCloud, CheckCircle2, XCircle, Loader2, Camera, Clock, MapPin, X,
+  UploadCloud, CheckCircle2, XCircle, Loader2, Clock, X,
 } from "lucide-react";
 import { useSession } from "next-auth/react";
 import { SiabNav } from "../../src/components/SiabNav";
@@ -12,11 +12,8 @@ const PROJECTS = ["projeto-junho-2026"];
 const ACCEPT   = ".avi,.mp4,.mov,.mkv";
 
 interface UploadResult {
-  video_id:        string;
-  s3_key:          string;
-  camera_id:       string | null;
-  captured_at:     string | null;
-  location_source: string;
+  video_id: string;
+  s3_key:   string;
 }
 
 interface FileItem {
@@ -29,9 +26,10 @@ interface FileItem {
 }
 
 const SOURCE_LABEL: Record<string, string> = {
-  metadata: "Metadados do arquivo",
-  ocr:      "OCR no overlay",
-  manual:   "Preenchimento manual necessário",
+  metadata:   "Metadados do arquivo",
+  ocr:        "OCR no overlay",
+  manual:     "Preenchimento manual necessário",
+  processing: "Aguardando processamento pelo pipeline…",
 };
 
 function mkId() {
@@ -78,31 +76,63 @@ export default function UploadPage() {
 
   const uploadOne = (item: FileItem, token: string | undefined): Promise<void> =>
     new Promise((resolve) => {
-      patch(item.id, { status: "uploading", progress: 0 });
+      (async () => {
+        try {
+          patch(item.id, { status: "uploading", progress: 0 });
+          const authHeader: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
 
-      const form = new FormData();
-      form.append("file", item.file);
+          // Passo 1 — obtém URL pré-assinada do S3
+          const urlResp = await fetch(`${API_BASE}/projects/${project}/videos/upload-url`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...authHeader },
+            body: JSON.stringify({
+              filename:     item.file.name,
+              content_type: item.file.type || "video/x-msvideo",
+            }),
+          });
+          if (!urlResp.ok) {
+            patch(item.id, { status: "error", error: `Erro ${urlResp.status}: ${await urlResp.text()}` });
+            return resolve();
+          }
+          const { video_id, upload_url, s3_key } = await urlResp.json() as {
+            video_id: string; upload_url: string; s3_key: string;
+          };
 
-      const xhr = new XMLHttpRequest();
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable)
-          patch(item.id, { progress: Math.round((e.loaded / e.total) * 100) });
-      };
-      xhr.onload = () => {
-        if (xhr.status === 200) {
-          patch(item.id, { status: "done", progress: 100, result: JSON.parse(xhr.responseText) });
-        } else {
-          patch(item.id, { status: "error", error: `Erro ${xhr.status}: ${xhr.responseText}` });
+          // Passo 2 — PUT direto ao S3 com barra de progresso real
+          await new Promise<void>((res2, rej2) => {
+            const xhr = new XMLHttpRequest();
+            xhr.upload.onprogress = (e) => {
+              if (e.lengthComputable)
+                patch(item.id, { progress: Math.round((e.loaded / e.total) * 100) });
+            };
+            xhr.onload = () => {
+              if (xhr.status >= 200 && xhr.status < 300) res2();
+              else rej2(new Error(`S3 retornou ${xhr.status}: ${xhr.responseText}`));
+            };
+            xhr.onerror = () => rej2(new Error("Erro de rede no upload para S3."));
+            xhr.open("PUT", upload_url);
+            // Content-Type deve bater com o informado ao gerar a URL pré-assinada
+            xhr.setRequestHeader("Content-Type", item.file.type || "video/x-msvideo");
+            xhr.send(item.file);
+          });
+
+          // Passo 3 — confirma upload e dispara pipeline
+          const confirmResp = await fetch(
+            `${API_BASE}/projects/${project}/videos/${video_id}/confirm`,
+            { method: "POST", headers: authHeader },
+          );
+          if (!confirmResp.ok) {
+            patch(item.id, { status: "error", error: `Erro ao confirmar: ${await confirmResp.text()}` });
+            return resolve();
+          }
+
+          patch(item.id, { status: "done", progress: 100, result: { video_id, s3_key } });
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : "Erro desconhecido.";
+          patch(item.id, { status: "error", error: msg });
         }
         resolve();
-      };
-      xhr.onerror = () => {
-        patch(item.id, { status: "error", error: "Erro de rede — tente novamente." });
-        resolve();
-      };
-      xhr.open("POST", `${API_BASE}/projects/${project}/videos/upload`);
-      if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
-      xhr.send(form);
+      })();
     });
 
   const handleSubmit = async () => {
@@ -298,19 +328,10 @@ function FileCard({ item, onRemove }: { item: FileItem; onRemove: () => void }) 
 
       {/* Resultado */}
       {item.status === "done" && item.result && (
-        <>
-          <div className="grid grid-cols-2 gap-2.5">
-            <InfoRow icon={<Camera size={12} />} label="Câmera"    value={item.result.camera_id   ?? "—"} />
-            <InfoRow icon={<Clock size={12} />}  label="Timestamp" value={item.result.captured_at ?? "—"} />
-            <InfoRow icon={<MapPin size={12} />} label="Origem"    value={SOURCE_LABEL[item.result.location_source] ?? item.result.location_source} />
-            <InfoRow icon={null}                 label="Video ID"  value={item.result.video_id.slice(0, 8) + "…"} mono />
-          </div>
-          {item.result.location_source === "manual" && (
-            <p className="text-xs" style={{ color: "#E2A33C" }}>
-              Timestamp e câmera não encontrados automaticamente — preencha na revisão.
-            </p>
-          )}
-        </>
+        <div className="grid grid-cols-2 gap-2.5">
+          <InfoRow icon={null} label="Video ID" value={item.result.video_id.slice(0, 8) + "…"} mono />
+          <InfoRow icon={<Clock size={12} />} label="Pipeline" value="Em processamento…" />
+        </div>
       )}
 
       {/* Erro */}

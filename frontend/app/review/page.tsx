@@ -5,10 +5,11 @@ import {
   CheckCircle2, XCircle, PencilLine, Loader2, AlertCircle,
   RefreshCw, X, SkipForward, Film,
 } from "lucide-react";
+import { useSession } from "next-auth/react";
 import { SiabNav } from "../../src/components/SiabNav";
+import { API_BASE, apiHeaders } from "../../src/lib/api";
 
 const PROJECT_ID = "projeto-junho-2026";
-const API_BASE   = `/api/v1`;
 
 interface Appearance {
   appearance_id:      string;
@@ -26,6 +27,7 @@ interface Appearance {
   discrepant_species: string[] | null;
   frame_start:        number | null;
   frame_end:          number | null;
+  bbox:               [number, number, number, number] | null;
 }
 
 interface FrameAnnotation {
@@ -120,6 +122,9 @@ function DiscrepancyBadge({ species }: { species: string[] }) {
 }
 
 function FrameCarousel({ appearanceId }: { appearanceId: string }) {
+  const { data: session } = useSession();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const idToken = (session as any)?.idToken as string | undefined;
   const [annotations, setAnnotations] = useState<FrameAnnotation[]>([]);
   const [loading, setLoading]         = useState(true);
   const [activeIdx, setActiveIdx]     = useState(0);
@@ -127,7 +132,7 @@ function FrameCarousel({ appearanceId }: { appearanceId: string }) {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    fetch(`${API_BASE}/appearances/${appearanceId}/frame-annotations`)
+    fetch(`${API_BASE}/appearances/${appearanceId}/frame-annotations`, { headers: apiHeaders(idToken) })
       .then((r) => r.json())
       .then((d) => { if (!cancelled) { setAnnotations(d.items ?? []); setLoading(false); } })
       .catch(() => { if (!cancelled) setLoading(false); });
@@ -270,6 +275,107 @@ function DiscrepancyResolver({
   );
 }
 
+// ── ThumbnailWithBbox ─────────────────────────────────────────────────────────
+
+function ThumbnailWithBbox({
+  url, bbox, timeLabel,
+}: {
+  url: string;
+  bbox: [number, number, number, number] | null;
+  timeLabel: string;
+}) {
+  const imgRef       = useRef<HTMLImageElement>(null);
+  const canvasRef    = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const draw = useCallback(() => {
+    const canvas    = canvasRef.current;
+    const img       = imgRef.current;
+    const container = containerRef.current;
+    if (!canvas || !img || !container || !bbox) return;
+
+    const cW = container.clientWidth;
+    const cH = container.clientHeight;
+    canvas.width  = cW;
+    canvas.height = cH;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, cW, cH);
+
+    const natW = img.naturalWidth;
+    const natH = img.naturalHeight;
+    if (!natW || !natH) return;
+
+    // object-fit: contain — escala para caber sem cortar
+    const scale   = Math.min(cW / natW, cH / natH);
+    const dispW   = natW * scale;
+    const dispH   = natH * scale;
+    const offsetX = (cW - dispW) / 2;
+    const offsetY = (cH - dispH) / 2;
+
+    // MegaDetector bbox: [x_min, y_min, width, height] normalizado 0-1
+    const [bx, by, bw, bh] = bbox;
+    const sx = bx * natW * scale + offsetX;
+    const sy = by * natH * scale + offsetY;
+    const sw = bw * natW * scale;
+    const sh = bh * natH * scale;
+
+    ctx.strokeStyle = "#34C759";
+    ctx.lineWidth   = 2;
+    ctx.strokeRect(sx, sy, sw, sh);
+    ctx.fillStyle   = "#34C75918";
+    ctx.fillRect(sx, sy, sw, sh);
+  }, [bbox]);
+
+  useEffect(() => {
+    const img = imgRef.current;
+    if (!img) return;
+    if (img.complete && img.naturalWidth) draw();
+    else img.onload = draw;
+  }, [draw]);
+
+  // Redesenha em resize (container pode mudar de largura)
+  useEffect(() => {
+    window.addEventListener("resize", draw);
+    return () => window.removeEventListener("resize", draw);
+  }, [draw]);
+
+  return (
+    <div
+      ref={containerRef}
+      style={{ position: "relative", height: 140, background: "#1A1814", borderRadius: 12, overflow: "hidden" }}
+    >
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        ref={imgRef}
+        src={url}
+        alt=""
+        onLoad={draw}
+        style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }}
+        onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+      />
+      {bbox && (
+        <canvas
+          ref={canvasRef}
+          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}
+        />
+      )}
+      {timeLabel !== "—" && (
+        <span style={{
+          position: "absolute", bottom: 6, left: 6,
+          padding: "2px 7px", borderRadius: 6,
+          fontSize: 11, fontWeight: 600, letterSpacing: "0.01em",
+          background: "rgba(34,31,26,0.72)", color: "#fff",
+          fontFamily: "IBM Plex Mono, monospace", backdropFilter: "blur(4px)",
+        }}>
+          {timeLabel}
+        </span>
+      )}
+    </div>
+  );
+}
+
 // ── AppearanceCard ─────────────────────────────────────────────────────────────
 
 interface CardProps {
@@ -358,30 +464,15 @@ function AppearanceCard({
         <ConfidenceDot score={app.species_score} />
       </div>
 
-      {/* Frame evidence: carousel for discrepant, single thumbnail otherwise */}
+      {/* Frame evidence: carousel for discrepant, thumbnail+bbox otherwise */}
       {app.review_status === "flagged_discrepancy" ? (
         <FrameCarousel appearanceId={app.appearance_id} />
       ) : app.thumbnail_url ? (
-        <div className="relative overflow-hidden rounded-xl" style={{ height: 140, background: "#EFE8DB" }}>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={app.thumbnail_url}
-            alt={`Frame de ${app.species}`}
-            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-            onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
-          />
-          {time !== "—" && (
-            <span style={{
-              position: "absolute", bottom: 6, left: 6,
-              padding: "2px 7px", borderRadius: 6,
-              fontSize: 11, fontWeight: 600, letterSpacing: "0.01em",
-              background: "rgba(34,31,26,0.72)", color: "#fff",
-              fontFamily: "IBM Plex Mono, monospace", backdropFilter: "blur(4px)",
-            }}>
-              {time}
-            </span>
-          )}
-        </div>
+        <ThumbnailWithBbox
+          url={app.thumbnail_url}
+          bbox={app.bbox ?? null}
+          timeLabel={time}
+        />
       ) : null}
 
       {/* Discrepancy resolution — species picker */}
@@ -570,6 +661,10 @@ function ShortcutBar() {
 // ── Page ───────────────────────────────────────────────────────────────────────
 
 export default function ReviewPage() {
+  const { data: session } = useSession();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const idToken = (session as any)?.idToken as string | undefined;
+
   const [appearances,  setAppearances]  = useState<Appearance[]>([]);
   const [loading,      setLoading]      = useState(true);
   const [error,        setError]        = useState<string | null>(null);
@@ -590,8 +685,8 @@ export default function ReviewPage() {
     setError(null);
     try {
       const [pendingRes, discrepantRes] = await Promise.all([
-        fetch(`${API_BASE}/projects/${PROJECT_ID}/appearances?review_status=pending`),
-        fetch(`${API_BASE}/projects/${PROJECT_ID}/appearances?review_status=flagged_discrepancy`),
+        fetch(`${API_BASE}/projects/${PROJECT_ID}/appearances?review_status=pending`, { headers: apiHeaders(idToken) }),
+        fetch(`${API_BASE}/projects/${PROJECT_ID}/appearances?review_status=flagged_discrepancy`, { headers: apiHeaders(idToken) }),
       ]);
       if (!pendingRes.ok) throw new Error(`HTTP ${pendingRes.status}`);
       const [pendingData, discrepantData] = await Promise.all([
@@ -629,7 +724,7 @@ export default function ReviewPage() {
   ) => {
     const res = await fetch(`${API_BASE}/appearances/${id}/review`, {
       method:  "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers: apiHeaders(idToken, { "Content-Type": "application/json" }),
       body:    JSON.stringify({ action, corrected_species: species }),
     });
     if (!res.ok) {
