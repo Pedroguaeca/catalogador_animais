@@ -2,12 +2,12 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { UploadCloud, ClipboardList, Download, LayoutGrid, BarChart2, PlusCircle, LogOut } from "lucide-react";
+import { UploadCloud, ClipboardList, Download, LayoutGrid, BarChart2, LogOut } from "lucide-react";
 import { useSession, signOut } from "next-auth/react";
 
 const links = [
-  { href: "/",          label: "Anotação",   icon: LayoutGrid },
   { href: "/upload",    label: "Upload",     icon: UploadCloud },
+  { href: "/",          label: "Anotação",   icon: LayoutGrid },
   { href: "/review",    label: "Revisão",    icon: ClipboardList },
   { href: "/dashboard", label: "Dashboard",  icon: BarChart2 },
   { href: "/export",    label: "Exportar",   icon: Download },
@@ -102,25 +102,6 @@ export function SiabNav() {
         Sair
       </button>
 
-      <div style={{ width: 1, height: 22, background: "#E7DECF" }} />
-
-      <Link
-        href="/upload"
-        style={{
-          display: "flex", alignItems: "center", gap: 6,
-          padding: "6px 12px", borderRadius: 10, textDecoration: "none",
-          fontSize: 13, fontWeight: 500,
-          color: "#2F6B4F", background: "#EEF5F0",
-          border: "1.5px solid #CDE3D6",
-          fontFamily: "IBM Plex Sans, sans-serif",
-          transition: "background 0.15s",
-        }}
-        onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "#CDE3D6")}
-        onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "#EEF5F0")}
-      >
-        <PlusCircle size={14} />
-        Adicionar vídeos
-      </Link>
     </header>
   );
 }
