@@ -14,6 +14,8 @@ import io
 import logging
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Optional
 
 import boto3
@@ -22,8 +24,10 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 logger = logging.getLogger(__name__)
 
-BUCKET_NAME = os.environ.get("SIAB_BUCKET", "siab-media-dev")
-LOG_INTERVAL = 10  # logar progresso a cada N frames
+BUCKET_NAME    = os.environ.get("SIAB_BUCKET",     "siab-media-dev")
+CAMERAS_TABLE  = os.environ.get("CAMERAS_TABLE",  "siab-cameras")
+VIDEOS_TABLE   = os.environ.get("VIDEOS_TABLE",   "siab-videos")
+LOG_INTERVAL   = 10  # logar progresso a cada N frames
 
 
 # ── Tipos ────────────────────────────────────────────────────────────────────
@@ -177,6 +181,118 @@ def ingest_video(
     return result
 
 
+# ── Helpers para metadados pós-OCR ────────────────────────────────────────────
+
+
+def _ensure_camera(ddb_resource, tenant_id: str, project_id: str, camera_id: str) -> None:
+    """Cria entrada de câmera em siab-cameras se ainda não existir (idempotente)."""
+    try:
+        table = ddb_resource.Table(CAMERAS_TABLE)
+        table.update_item(
+            Key={
+                "tenant_id":         tenant_id,
+                "project_id#camera_id": f"{project_id}#{camera_id}",
+            },
+            UpdateExpression=(
+                "SET project_id   = if_not_exists(project_id,   :p),"
+                "    camera_id    = if_not_exists(camera_id,    :c),"
+                "    created_at   = if_not_exists(created_at,   :ts)"
+            ),
+            ExpressionAttributeValues={
+                ":p":  project_id,
+                ":c":  camera_id,
+                ":ts": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        logger.info("_ensure_camera | tenant=%s project=%s camera=%s", tenant_id, project_id, camera_id)
+    except Exception as exc:
+        logger.warning("_ensure_camera falhou para %s/%s/%s: %s", tenant_id, project_id, camera_id, exc)
+
+
+
+def _claim_video_for_processing(
+    ddb_resource,
+    tenant_id: str,
+    project_id: str,
+    video_id: str,
+) -> bool:
+    """Muda atomicamente status 'uploaded' → 'processing' via conditional update.
+
+    Retorna True se reclamado com sucesso.
+    Retorna False se ConditionalCheckFailedException (vídeo já foi reclamado por
+    outra invocação — reentrega SQS segura de ignorar).
+    """
+    table = ddb_resource.Table(VIDEOS_TABLE)
+    try:
+        table.update_item(
+            Key={
+                "tenant_id":           tenant_id,
+                "project_id#video_id": f"{project_id}#{video_id}",
+            },
+            UpdateExpression="SET #status = :processing",
+            ConditionExpression="#status = :uploaded",
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":processing": "processing",
+                ":uploaded":   "uploaded",
+            },
+        )
+        return True
+    except table.meta.client.exceptions.ConditionalCheckFailedException:
+        return False
+
+
+def _update_video_status(
+    ddb_resource,
+    tenant_id: str,
+    project_id: str,
+    video_id: str,
+    camera_id: Optional[str],
+    captured_at: Optional[str],
+    temperature_c: Optional[float],
+) -> None:
+    """Grava campos OCR em siab-videos e avança status para 'processing'.
+
+    Executado mesmo com OCR parcial/falha: o pipeline downstream trata os
+    campos como opcionais. 'status' é palavra reservada no DynamoDB —
+    obrigatório ExpressionAttributeNames.
+    """
+    try:
+        table = ddb_resource.Table(VIDEOS_TABLE)
+        table.update_item(
+            Key={
+                "tenant_id":           tenant_id,
+                "project_id#video_id": f"{project_id}#{video_id}",
+            },
+            UpdateExpression=(
+                "SET #status = :status,"
+                "    camera_id = :camera_id,"
+                "    captured_at = :captured_at,"
+                "    temperature_c = :temperature_c,"
+                "    processing_started_at = :now"
+            ),
+            ExpressionAttributeNames={"#status": "status"},
+            ExpressionAttributeValues={
+                ":status":       "processing",
+                ":camera_id":    camera_id,
+                ":captured_at":  captured_at,
+                ":temperature_c": (
+                    Decimal(str(temperature_c)) if temperature_c is not None else None
+                ),
+                ":now": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        logger.info(
+            "_update_video_status | tenant=%s video=%s status=processing"
+            " camera=%s ts=%s temp=%s",
+            tenant_id, video_id, camera_id, captured_at, temperature_c,
+        )
+    except Exception as exc:
+        logger.warning(
+            "_update_video_status falhou para %s/%s: %s", tenant_id, video_id, exc
+        )
+
+
 # ── Lambda handler ────────────────────────────────────────────────────────────
 
 
@@ -190,12 +306,17 @@ def lambda_handler(event, context):
             "project_id":   "proj-001",
             "video_id":     "vid-001"
         }
+
+    camera_id, captured_at e temperature_c são extraídos por OCR aqui,
+    não mais enviados na mensagem SQS (migração do upload síncrono).
     """
     import json
-    import tempfile
 
-    s3  = boto3.client("s3")
-    sqs = boto3.client("sqs")
+    logging.getLogger().setLevel(logging.INFO)
+
+    s3   = boto3.client("s3")
+    sqs  = boto3.client("sqs")
+    ddb  = boto3.resource("dynamodb")
     frames_queue_url = os.environ.get("FRAMES_QUEUE_URL", "")
 
     for record in event.get("Records", []):
@@ -205,9 +326,44 @@ def lambda_handler(event, context):
         project_id   = body["project_id"]
         video_id     = body["video_id"]
 
-        local_path = f"/tmp/{video_id}.mp4"
+        if not _claim_video_for_processing(ddb, tenant_id, project_id, video_id):
+            logger.warning(
+                "Idempotência | video_id=%s já reclamado para processamento "
+                "— ignorando reentrega SQS",
+                video_id,
+            )
+            continue
+
+        # Extensão original preservada na s3_key
+        ext        = os.path.splitext(video_s3_key)[1] or ".avi"
+        local_path = f"/tmp/{video_id}{ext}"
         logger.info("Baixando s3://%s/%s → %s", BUCKET_NAME, video_s3_key, local_path)
         s3.download_file(BUCKET_NAME, video_s3_key, local_path)
+
+        # ── OCR: extrai camera_id, captured_at, temperature_c do vídeo ──
+        camera_id = captured_at = temperature_c = None
+        try:
+            from pipeline.ocr import extract_video_metadata
+            meta = extract_video_metadata(local_path)
+            camera_id     = meta.camera_id
+            captured_at   = meta.captured_at
+            temperature_c = meta.temperature_c
+            logger.info(
+                "OCR | video_id=%s camera=%s ts=%s temp=%s source=%s",
+                video_id, camera_id, captured_at, temperature_c, meta.location_source,
+            )
+        except Exception as exc:
+            logger.warning("OCR falhou para %s: %s", video_id, exc)
+
+        # ── Cria câmera em siab-cameras se necessário ────────────────────
+        if camera_id:
+            _ensure_camera(ddb, tenant_id, project_id, camera_id)
+
+        # ── Atualiza siab-videos: status=processing + campos OCR ─────────
+        _update_video_status(
+            ddb, tenant_id, project_id, video_id,
+            camera_id, captured_at, temperature_c,
+        )
 
         try:
             result = ingest_video(
@@ -234,6 +390,9 @@ def lambda_handler(event, context):
                         "total_frames":     result.total_frames,
                         "fps":              result.fps,
                         "duration_seconds": result.duration_seconds,
+                        "camera_id":        camera_id,
+                        "captured_at":      captured_at,
+                        "temperature_c":    temperature_c,
                     },
                 }),
             )
