@@ -2,10 +2,18 @@
 backend/api.py — Backend FastAPI do SIAB (MVP interno).
 
 Endpoints:
-    POST   /projects/{project_id}/videos/upload      — upload de vídeo + OCR + fila
-    GET    /projects/{project_id}/appearances         — lista aparições com filtros
-    PATCH  /appearances/{appearance_id}/review        — revisão humana de aparição
-    GET    /projects/{project_id}/appearances/export  — CSV exportação
+    POST   /projects/{project_id}/videos/upload-url      — gera URL pré-assinada S3 + cria registro pending
+    POST   /projects/{project_id}/videos/{video_id}/confirm — confirma upload; dispara pipeline via SQS
+    GET    /projects/{project_id}/appearances             — lista aparições com filtros
+    PATCH  /appearances/{appearance_id}/review            — revisão humana de aparição
+    GET    /projects/{project_id}/appearances/export      — CSV exportação
+
+Mudança de comportamento (upload):
+    Antes: frontend enviava o vídeo no corpo da requisição → API fazia OCR síncrono e retornava
+           camera_id/captured_at imediatamente. Limitado a 10 MB pelo API Gateway.
+    Agora: frontend obtém URL pré-assinada S3, envia o vídeo DIRETO ao S3 (sem passar pelo
+           API Gateway), depois confirma via /confirm. O OCR migrou para o ingester Lambda,
+           que extrai camera_id/captured_at ao processar o vídeo. Sem limite de tamanho.
 """
 
 from __future__ import annotations
@@ -15,7 +23,6 @@ import io
 import json
 import logging
 import os
-import tempfile
 import urllib.request
 import uuid
 from datetime import datetime, timezone
@@ -24,13 +31,11 @@ from typing import Literal
 
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from jose import ExpiredSignatureError, JWTError, jwk, jwt
 from pydantic import BaseModel
-
-from pipeline.ocr import VideoMetadata, extract_video_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +47,7 @@ APPEARANCES_TABLE       = os.environ.get("APPEARANCES_TABLE",        "siab-appea
 REVIEWS_TABLE           = os.environ.get("REVIEWS_TABLE",            "siab-reviews")
 FRAME_ANNOTATIONS_TABLE = os.environ.get("FRAME_ANNOTATIONS_TABLE",  "siab-frame-annotations")
 CAMERAS_TABLE           = os.environ.get("CAMERAS_TABLE",            "siab-cameras")
+VIDEOS_TABLE            = os.environ.get("VIDEOS_TABLE",             "siab-videos")
 VIDEOS_QUEUE_NAME       = os.environ.get("VIDEOS_QUEUE_NAME",        "siab-videos")
 AWS_REGION              = os.environ.get("AWS_DEFAULT_REGION",       "us-east-1")
 
@@ -98,7 +104,16 @@ def _cameras_table():
     return boto3.resource("dynamodb", region_name=AWS_REGION).Table(CAMERAS_TABLE)
 
 
+def _videos_table():
+    return boto3.resource("dynamodb", region_name=AWS_REGION).Table(VIDEOS_TABLE)
+
+
 # ── Schemas ────────────────────────────────────────────────────────────────────
+
+
+class UploadUrlRequest(BaseModel):
+    filename:     str
+    content_type: str = "video/x-msvideo"
 
 
 class ReviewRequest(BaseModel):
@@ -490,81 +505,94 @@ def _check_discrepancy(appearance_id: str, app_sk: str, tenant_id: str) -> None:
 # ── Endpoint 1 — Upload de vídeo ──────────────────────────────────────────────
 
 
-@app.post("/projects/{project_id}/videos/upload")
-async def upload_video(
+@app.post("/projects/{project_id}/videos/upload-url")
+def generate_upload_url(
     project_id: str,
-    file: UploadFile = File(...),
+    body: UploadUrlRequest,
     tenant_id: str = Depends(get_current_tenant),
 ):
-    """Faz upload de vídeo, roda OCR, publica na fila siab-videos."""
-    video_id  = str(uuid.uuid4())
+    """Gera URL pré-assinada S3 para upload direto (sem passar pelo API Gateway).
 
-    ext       = os.path.splitext(file.filename or "video.avi")[1].lower() or ".avi"
-    s3_key    = f"{tenant_id}/videos/{video_id}{ext}"
+    Fluxo:
+        1. Frontend chama este endpoint → recebe upload_url + video_id
+        2. Frontend faz PUT direto ao S3 usando upload_url (sem Authorization header — a URL já está assinada)
+        3. Frontend chama POST /projects/{id}/videos/{video_id}/confirm para disparar o pipeline
+    """
+    video_id = str(uuid.uuid4())
+    ext      = os.path.splitext(body.filename)[1].lower() or ".avi"
+    s3_key   = f"{tenant_id}/videos/{video_id}{ext}"
+    now      = datetime.now(timezone.utc).isoformat()
 
-    content = await file.read()
+    # Registro inicial em siab-videos
+    _videos_table().put_item(Item={
+        "tenant_id":         tenant_id,
+        "project_id#video_id": f"{project_id}#{video_id}",
+        "project_id":        project_id,
+        "video_id":          video_id,
+        "s3_key":            s3_key,
+        "original_filename": body.filename,
+        "status":            "pending_upload",
+        "created_at":        now,
+    })
 
-    # Upload para S3
-    s3 = _s3_client()
-    s3.put_object(
-        Bucket=BUCKET,
-        Key=s3_key,
-        Body=content,
-        ContentType=file.content_type or "video/x-msvideo",
+    # URL pré-assinada PUT (expira em 1 hora)
+    # O frontend DEVE enviar Content-Type igual ao informado aqui
+    upload_url = _s3_client().generate_presigned_url(
+        "put_object",
+        Params={"Bucket": BUCKET, "Key": s3_key, "ContentType": body.content_type},
+        ExpiresIn=3600,
     )
 
-    # OCR num arquivo temporário local
-    meta: VideoMetadata
-    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
-        tmp.write(content)
-        tmp_path = tmp.name
-    try:
-        meta = extract_video_metadata(tmp_path)
-    except Exception as exc:
-        logger.warning("OCR falhou para %s: %s", video_id, exc)
-        meta = VideoMetadata(
-            camera_id=None,
-            captured_at=None,
-            temperature_c=None,
-            location_source="manual",
-        )
-    finally:
-        os.unlink(tmp_path)
+    logger.info("URL gerada | tenant=%s project=%s video_id=%s", tenant_id, project_id, video_id)
+    return {"video_id": video_id, "upload_url": upload_url, "s3_key": s3_key}
 
-    # Publica na fila siab-videos para o ingester Lambda consumir
+
+@app.post("/projects/{project_id}/videos/{video_id}/confirm")
+def confirm_upload(
+    project_id: str,
+    video_id:   str,
+    tenant_id:  str = Depends(get_current_tenant),
+):
+    """Confirma que o upload direto ao S3 foi concluído e dispara o pipeline.
+
+    Atualiza siab-videos para status='uploaded' e publica mensagem SQS para
+    o ingester. O OCR (camera_id, captured_at, temperature_c) e a criação de
+    câmera acontecem dentro do ingester, de forma assíncrona.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Busca o registro para obter s3_key
+    vid_item = _videos_table().get_item(
+        Key={"tenant_id": tenant_id, "project_id#video_id": f"{project_id}#{video_id}"}
+    ).get("Item")
+    if not vid_item:
+        raise HTTPException(status_code=404, detail="Vídeo não encontrado")
+
+    s3_key = vid_item["s3_key"]
+
+    # Atualiza status para uploaded
+    _videos_table().update_item(
+        Key={"tenant_id": tenant_id, "project_id#video_id": f"{project_id}#{video_id}"},
+        UpdateExpression="SET #st = :s, uploaded_at = :t",
+        ExpressionAttributeNames={"#st": "status"},
+        ExpressionAttributeValues={":s": "uploaded", ":t": now},
+    )
+
+    # Dispara pipeline (sem OCR — o ingester extrai esses metadados)
     sqs = _sqs_client()
     queue_url = sqs.get_queue_url(QueueName=VIDEOS_QUEUE_NAME)["QueueUrl"]
     sqs.send_message(
         QueueUrl=queue_url,
         MessageBody=json.dumps({
-            "video_s3_key":  s3_key,
-            "tenant_id":     tenant_id,
-            "project_id":    project_id,
-            "video_id":      video_id,
-            "camera_id":     meta.camera_id,
-            "captured_at":   meta.captured_at,
-            "temperature_c": meta.temperature_c,
+            "video_s3_key": s3_key,
+            "tenant_id":    tenant_id,
+            "project_id":   project_id,
+            "video_id":     video_id,
         }),
     )
 
-    camera_is_new = False
-    if meta.camera_id:
-        camera_is_new = _ensure_camera(tenant_id, project_id, meta.camera_id)
-
-    logger.info(
-        "Vídeo enviado | tenant=%s project=%s video_id=%s camera=%s ts=%s source=%s camera_is_new=%s",
-        tenant_id, project_id, video_id, meta.camera_id, meta.captured_at,
-        meta.location_source, camera_is_new,
-    )
-
-    return {
-        "video_id":        video_id,
-        "s3_key":          s3_key,
-        "camera_id":       meta.camera_id,
-        "captured_at":     meta.captured_at,
-        "location_source": meta.location_source,
-        "camera_is_new":   camera_is_new,
-    }
+    logger.info("Upload confirmado | tenant=%s project=%s video_id=%s", tenant_id, project_id, video_id)
+    return {"video_id": video_id, "status": "processing"}
 
 
 # ── Endpoints 2-4 — Câmeras ───────────────────────────────────────────────────
@@ -1028,3 +1056,153 @@ def export_appearances(
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ── Task A — Frame carousel endpoint ─────────────────────────────────────────
+
+
+@app.get("/projects/{project_id}/appearances/{appearance_id}/frames")
+def list_appearance_frames(
+    project_id:    str,
+    appearance_id: str,
+    tenant_id:     str = Depends(get_current_tenant),
+):
+    """Retorna URLs presigned para todos os frames de uma aparição (frame_start..frame_end)."""
+    item = _find_appearance(_appearances_table(), tenant_id, appearance_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Aparição não encontrada")
+
+    video_id    = item.get("video_id", "")
+    frame_start = int(item.get("frame_start", 0))
+    frame_end   = int(item.get("frame_end",   frame_start))
+    best_key    = item.get("best_crop_s3_key", "")
+    best_idx    = _frame_idx_from_path(best_key) if best_key else frame_start
+    bbox        = _clean(item.get("bbox")) if item.get("bbox") else None
+
+    frames = [
+        {
+            "frame_idx": idx,
+            "url":       _presigned_url(f"{tenant_id}/frames/{video_id}/frame_{idx:05d}.jpg"),
+            "is_best":   idx == best_idx,
+            "bbox":      bbox if idx == best_idx else None,
+        }
+        for idx in range(frame_start, frame_end + 1)
+    ]
+
+    return {
+        "appearance_id": appearance_id,
+        "frame_count":   len(frames),
+        "frames":        frames,
+    }
+
+
+# ── Task B — Vídeos list + delete ────────────────────────────────────────────
+
+
+@app.get("/projects/{project_id}/videos")
+def list_videos(
+    project_id: str,
+    tenant_id:  str = Depends(get_current_tenant),
+):
+    """Lista vídeos do projecto com status de display calculado a partir das aparições."""
+    vid_tbl = _videos_table()
+
+    vids: list[dict] = []
+    kwargs: dict = {
+        "KeyConditionExpression": (
+            Key("tenant_id").eq(tenant_id)
+            & Key("project_id#video_id").begins_with(f"{project_id}#")
+        ),
+    }
+    while True:
+        resp = vid_tbl.query(**kwargs)
+        vids.extend(resp.get("Items", []))
+        lek = resp.get("LastEvaluatedKey")
+        if not lek:
+            break
+        kwargs["ExclusiveStartKey"] = lek
+
+    # Busca todas as aparições do projecto de uma vez (evita N+1)
+    appearances = _appearances_from_project(_appearances_table(), tenant_id, project_id)
+    by_video: dict[str, list[dict]] = {}
+    for a in appearances:
+        by_video.setdefault(a.get("video_id", ""), []).append(a)
+
+    def _display_status(vid_status: str, apps: list[dict]) -> str:
+        if not apps:
+            return "Processando"
+        if all(a.get("review_status") in ("confirmed", "rejected") for a in apps):
+            return "Revisado"
+        return "Aguardando revisão"
+
+    result = []
+    for v in sorted(vids, key=lambda x: x.get("captured_at") or x.get("uploaded_at") or ""):
+        vid_id = v.get("video_id", "")
+        apps   = by_video.get(vid_id, [])
+        result.append(_clean({
+            "video_id":          vid_id,
+            "original_filename": v.get("original_filename"),
+            "camera_id":         v.get("camera_id"),
+            "captured_at":       v.get("captured_at"),
+            "uploaded_at":       v.get("uploaded_at"),
+            "status":            v.get("status"),
+            "display_status":    _display_status(str(v.get("status", "")), apps),
+            "species":           sorted({a.get("species") for a in apps if a.get("species")}),
+            "appearance_count":  len(apps),
+        }))
+
+    return {"project_id": project_id, "count": len(result), "videos": result}
+
+
+@app.delete("/projects/{project_id}/videos/{video_id}", status_code=204)
+def delete_video(
+    project_id: str,
+    video_id:   str,
+    tenant_id:  str = Depends(get_current_tenant),
+):
+    """Remove vídeo: apaga S3 frames + ficheiro + aparições + registo DynamoDB."""
+    vid_tbl = _videos_table()
+    app_tbl = _appearances_table()
+
+    vid_item = vid_tbl.get_item(
+        Key={"tenant_id": tenant_id, "project_id#video_id": f"{project_id}#{video_id}"}
+    ).get("Item")
+    if not vid_item:
+        raise HTTPException(status_code=404, detail="Vídeo não encontrado")
+
+    s3 = _s3_client()
+
+    # Apaga frames no S3
+    prefix = f"{tenant_id}/frames/{video_id}/"
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=BUCKET, Prefix=prefix):
+        objs = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
+        if objs:
+            s3.delete_objects(Bucket=BUCKET, Delete={"Objects": objs})
+
+    # Apaga ficheiro de vídeo
+    s3_key = vid_item.get("s3_key")
+    if s3_key:
+        try:
+            s3.delete_object(Bucket=BUCKET, Key=s3_key)
+        except Exception:
+            pass
+
+    # Apaga aparições associadas
+    apps = app_tbl.query(
+        KeyConditionExpression=(
+            Key("tenant_id").eq(tenant_id)
+            & Key("video_id#appearance_id").begins_with(f"{video_id}#")
+        )
+    ).get("Items", [])
+    for a in apps:
+        app_tbl.delete_item(
+            Key={"tenant_id": tenant_id, "video_id#appearance_id": a["video_id#appearance_id"]}
+        )
+
+    # Apaga registo do vídeo
+    vid_tbl.delete_item(
+        Key={"tenant_id": tenant_id, "project_id#video_id": f"{project_id}#{video_id}"}
+    )
+
+    return Response(status_code=204)

@@ -376,6 +376,160 @@ function ThumbnailWithBbox({
   );
 }
 
+
+// ── AppearanceFrames ──────────────────────────────────────────────────────────
+
+interface FrameItem {
+  frame_idx: number;
+  url:       string | null;
+  is_best:   boolean;
+  bbox:      [number, number, number, number] | null;
+}
+
+function AppearanceFrames({
+  appearanceId,
+  projectId,
+  fallbackUrl,
+  fallbackBbox,
+  timeLabel,
+}: {
+  appearanceId: string;
+  projectId:    string;
+  fallbackUrl:  string | null;
+  fallbackBbox: [number, number, number, number] | null;
+  timeLabel:    string;
+}) {
+  const { data: session } = useSession();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const idToken = (session as any)?.idToken as string | undefined;
+  const [frames,    setFrames]    = useState<FrameItem[]>([]);
+  const [activeIdx, setActiveIdx] = useState(0);
+  const [loading,   setLoading]   = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetch(
+      `${API_BASE}/projects/${projectId}/appearances/${appearanceId}/frames`,
+      { headers: apiHeaders(idToken) },
+    )
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (cancelled) return;
+        const fs: FrameItem[] = d?.frames ?? [];
+        setFrames(fs);
+        const bestIdx = fs.findIndex((f) => f.is_best);
+        setActiveIdx(bestIdx >= 0 ? bestIdx : 0);
+        setLoading(false);
+      })
+      .catch(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [appearanceId, projectId, idToken]);
+
+  if (loading) return (
+    <div
+      className="flex items-center justify-center"
+      style={{ height: 140, background: "#1A1814", borderRadius: 12, color: "#9A9080" }}
+    >
+      <Loader2 size={14} className="animate-spin" />
+    </div>
+  );
+
+  if (frames.length === 0) {
+    return fallbackUrl
+      ? <ThumbnailWithBbox url={fallbackUrl} bbox={fallbackBbox} timeLabel={timeLabel} />
+      : null;
+  }
+
+  const active = frames[activeIdx];
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div style={{ position: "relative" }}>
+        {active?.url ? (
+          <ThumbnailWithBbox url={active.url} bbox={active.bbox ?? null} timeLabel={timeLabel} />
+        ) : (
+          <div style={{ height: 140, background: "#1A1814", borderRadius: 12 }} />
+        )}
+        <span style={{
+          position: "absolute", top: 6, right: 6,
+          padding: "2px 7px", borderRadius: 6, fontSize: 11,
+          background: "rgba(34,31,26,0.72)", color: "#9A9080",
+          fontFamily: "IBM Plex Mono, monospace", backdropFilter: "blur(4px)",
+        }}>
+          {activeIdx + 1} / {frames.length}
+        </span>
+        {frames.length > 1 && (
+          <>
+            <button
+              onClick={(e) => { e.stopPropagation(); setActiveIdx((i) => Math.max(0, i - 1)); }}
+              disabled={activeIdx === 0}
+              style={{
+                position: "absolute", left: 4, top: "50%", transform: "translateY(-50%)",
+                width: 28, height: 28, borderRadius: 6, border: "none",
+                background: "rgba(34,31,26,0.64)", color: "#fff", cursor: "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                opacity: activeIdx === 0 ? 0.3 : 0.8, backdropFilter: "blur(4px)",
+                fontSize: 18, lineHeight: "1",
+              }}
+            >
+              ‹
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); setActiveIdx((i) => Math.min(frames.length - 1, i + 1)); }}
+              disabled={activeIdx === frames.length - 1}
+              style={{
+                position: "absolute", right: 4, top: "50%", transform: "translateY(-50%)",
+                width: 28, height: 28, borderRadius: 6, border: "none",
+                background: "rgba(34,31,26,0.64)", color: "#fff", cursor: "pointer",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                opacity: activeIdx === frames.length - 1 ? 0.3 : 0.8, backdropFilter: "blur(4px)",
+                fontSize: 18, lineHeight: "1",
+              }}
+            >
+              ›
+            </button>
+          </>
+        )}
+      </div>
+
+      {frames.length > 1 && (
+        <div className="flex gap-1.5 overflow-x-auto pb-1" style={{ scrollbarWidth: "none" }}>
+          {frames.slice(0, 12).map((f, i) => (
+            <button
+              key={f.frame_idx}
+              onClick={(e) => { e.stopPropagation(); setActiveIdx(i); }}
+              style={{
+                flexShrink: 0, width: 52, height: 40, borderRadius: 7,
+                overflow: "hidden", position: "relative",
+                border: i === activeIdx ? "2.5px solid #2F6B4F" : "2px solid transparent",
+                outline: "none", cursor: "pointer", padding: 0,
+                background: "#EFE8DB",
+              }}
+            >
+              {f.url ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={f.url} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+              ) : (
+                <span style={{ fontSize: 9, color: "#9A9080", fontFamily: "IBM Plex Mono, monospace" }}>
+                  {f.frame_idx}
+                </span>
+              )}
+              {f.is_best && (
+                <span style={{
+                  position: "absolute", bottom: 2, right: 2,
+                  width: 6, height: 6, borderRadius: "50%", background: "#2F6B4F",
+                  border: "1px solid rgba(255,255,255,0.7)",
+                }} />
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── AppearanceCard ─────────────────────────────────────────────────────────────
 
 interface CardProps {
@@ -464,16 +618,18 @@ function AppearanceCard({
         <ConfidenceDot score={app.species_score} />
       </div>
 
-      {/* Frame evidence: carousel for discrepant, thumbnail+bbox otherwise */}
+      {/* Frame evidence: carousel for discrepant, frame strip otherwise */}
       {app.review_status === "flagged_discrepancy" ? (
         <FrameCarousel appearanceId={app.appearance_id} />
-      ) : app.thumbnail_url ? (
-        <ThumbnailWithBbox
-          url={app.thumbnail_url}
-          bbox={app.bbox ?? null}
+      ) : (
+        <AppearanceFrames
+          appearanceId={app.appearance_id}
+          projectId={PROJECT_ID}
+          fallbackUrl={app.thumbnail_url}
+          fallbackBbox={app.bbox ?? null}
           timeLabel={time}
         />
-      ) : null}
+      )}
 
       {/* Discrepancy resolution — species picker */}
       {app.review_status === "flagged_discrepancy" && app.discrepant_species && !correcting && (

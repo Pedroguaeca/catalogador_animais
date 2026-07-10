@@ -2,13 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { UploadCloud, ClipboardList, Download, LayoutGrid, BarChart2, LogOut } from "lucide-react";
+import { UploadCloud, ClipboardList, Download, LayoutGrid, BarChart2, LogOut, Film } from "lucide-react";
 import { useSession, signOut } from "next-auth/react";
 
 const links = [
   { href: "/upload",    label: "Upload",     icon: UploadCloud },
   { href: "/",          label: "Anotação",   icon: LayoutGrid },
   { href: "/review",    label: "Revisão",    icon: ClipboardList },
+  { href: "/videos",    label: "Vídeos",     icon: Film },
   { href: "/dashboard", label: "Dashboard",  icon: BarChart2 },
   { href: "/export",    label: "Exportar",   icon: Download },
 ];
