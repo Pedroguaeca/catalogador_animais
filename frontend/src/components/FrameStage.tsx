@@ -32,7 +32,7 @@ export function FrameStage({ frame, zoom, onToggleZoom }: FrameStageProps) {
     const canvas    = canvasRef.current;
     const img       = imgRef.current;
     const container = containerRef.current;
-    if (!canvas || !img || !container || !det) return;
+    if (!canvas || !img || !container) return;
 
     const cW = container.clientWidth;
     const cH = container.clientHeight;
@@ -42,6 +42,10 @@ export function FrameStage({ frame, zoom, onToggleZoom }: FrameStageProps) {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.clearRect(0, 0, cW, cH);
+
+    // Limpa e sai cedo se este frame não tem detecção — sem isso o retângulo
+    // do frame anterior ficava "grudado" no canvas (nunca era limpo).
+    if (!det) return;
 
     const natW = img.naturalWidth;
     const natH = img.naturalHeight;
@@ -98,16 +102,15 @@ export function FrameStage({ frame, zoom, onToggleZoom }: FrameStageProps) {
     ctx.fillText(label, lx + pad, ly + th + pad - 1);
   }, [det, confidence]);
 
-  // Redesenha quando o frame muda
+  // Redesenha sempre que a detecção do frame atual mudar. O <img> abaixo tem
+  // key={frame.path}, então a cada troca de frame é um nó <img> novo (não o
+  // mesmo reaproveitado) — isso garante que o evento onload sempre dispara,
+  // em vez de depender de checar img.complete/naturalWidth num nó reciclado
+  // (que ficava sujeito a corrida com o cache do navegador e travava o
+  // desenho no primeiro frame carregado).
   useEffect(() => {
-    const img = imgRef.current;
-    if (!img) return;
-    if (img.complete && img.naturalWidth) {
-      drawBbox();
-    } else {
-      img.onload = drawBbox;
-    }
-  }, [frame, drawBbox]);
+    drawBbox();
+  }, [drawBbox]);
 
   // Redesenha ao redimensionar a janela
   useEffect(() => {
@@ -131,6 +134,7 @@ export function FrameStage({ frame, zoom, onToggleZoom }: FrameStageProps) {
         <>
           {/* Imagem — contain para não cortar a bbox */}
           <img
+            key={frame.path}
             ref={imgRef}
             src={frame.imageUrl ?? `/api/image?p=${encodeURIComponent(frame.path)}`}
             alt={`Frame ${frame.idx}`}
