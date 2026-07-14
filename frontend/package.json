@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "check:imports": "node scripts/check-imports.js"
   },
   "dependencies": {
     "@aws-sdk/client-cognito-identity-provider": "^3.1079.0",
