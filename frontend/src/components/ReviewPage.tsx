@@ -9,19 +9,21 @@ import { Filmstrip } from "./Filmstrip";
 import { IdentificationPanel } from "./IdentificationPanel";
 import { BottomBar } from "./BottomBar";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+import { useSession } from "next-auth/react";
+import { API_BASE, apiHeaders } from "../lib/api";
 
 function persistFrameAnnotation(
   videoId: string,
   framePath: string,
   annotatedSpecies: string,
-  source: "ai_confirm" | "chip_select" | "new_category"
+  source: "ai_confirm" | "chip_select" | "new_category",
+  idToken?: string,
 ) {
   const video_uuid = framePath.split("/")[0] ?? "";
   if (!video_uuid || !framePath) return;
   fetch(`${API_BASE}/frames/annotation`, {
     method: "PATCH",
-    headers: { "Content-Type": "application/json" },
+    headers: apiHeaders(idToken, { "Content-Type": "application/json" }),
     body: JSON.stringify({
       video_id:          video_uuid,
       frame_path:        framePath,
@@ -33,13 +35,29 @@ function persistFrameAnnotation(
 
 interface ReviewPageProps {
   videos: Video[];
+  initialVideoId?: string;
+  projectId?: string;
 }
 
-export function ReviewPage({ videos }: ReviewPageProps) {
-  const firstVideoId = videos[0]?.id ?? "";
+function confirmAllVideoOnServer(projectId: string, videoId: string, idToken?: string) {
+  if (!videoId) return;
+  fetch(`${API_BASE}/projects/${projectId}/videos/${videoId}/confirm-all`, {
+    method: "POST",
+    headers: apiHeaders(idToken),
+  }).catch(() => {});
+}
+
+export function ReviewPage({ videos, initialVideoId, projectId }: ReviewPageProps) {
+  const { data: session } = useSession();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const idToken = (session as any)?.idToken as string | undefined;
+
+  const firstVideoId = (initialVideoId && videos.some((v) => v.id === initialVideoId))
+    ? initialVideoId
+    : videos[0]?.id ?? "";
   const [state, dispatch] = useReducer(
     reviewReducer,
-    initialState(firstVideoId, videos[0]?.frames.length ?? 0)
+    initialState(firstVideoId, videos.find((v) => v.id === firstVideoId)?.frames ?? [])
   );
   const [zoom, setZoom] = useState(false);
 
@@ -94,7 +112,10 @@ export function ReviewPage({ videos }: ReviewPageProps) {
         videoIdx={videoIdx}
         totalVideos={videos.length}
         annotated={state.annotated}
-        onVideoChange={(id) => dispatch({ type: "SET_VIDEO", payload: id })}
+        onVideoChange={(id) => dispatch({
+          type: "SET_VIDEO",
+          payload: { videoId: id, frames: videos.find((v) => v.id === id)?.frames ?? [] },
+        })}
         onJumpUnannotated={handleJumpToFirstUnannotated}
       />
 
@@ -131,17 +152,20 @@ export function ReviewPage({ videos }: ReviewPageProps) {
             dispatch({ type: "MARK_ANNOTATED" });
             if (frame?.path) {
               const name = state.categories.find((c) => c.id === id)?.name ?? id;
-              persistFrameAnnotation(state.videoId, frame.path, name, "chip_select");
+              persistFrameAnnotation(state.videoId, frame.path, name, "chip_select", idToken);
             }
           }}
           onConfirmAI={() => {
             dispatch({ type: "CONFIRM_AI" });
             dispatch({ type: "MARK_ANNOTATED" });
             if (frame?.path && frame.detection) {
-              persistFrameAnnotation(state.videoId, frame.path, frame.detection.genus, "ai_confirm");
+              persistFrameAnnotation(state.videoId, frame.path, frame.detection.genus, "ai_confirm", idToken);
             }
           }}
-          onConfirmVideo={() => dispatch({ type: "CONFIRM_ALL_VIDEO", payload: totalFrames })}
+          onConfirmVideo={() => {
+            dispatch({ type: "CONFIRM_ALL_VIDEO", payload: totalFrames });
+            if (projectId) confirmAllVideoOnServer(projectId, state.videoId, idToken);
+          }}
           onReject={() => dispatch({ type: "REJECT" })}
           onPrevFrame={() => dispatch({ type: "PREV_FRAME" })}
           onNextFrame={() => dispatch({ type: "NEXT_FRAME" })}
@@ -153,7 +177,7 @@ export function ReviewPage({ videos }: ReviewPageProps) {
             dispatch({ type: "ADD_CATEGORY", payload: name });
             dispatch({ type: "MARK_ANNOTATED" });
             if (frame?.path) {
-              persistFrameAnnotation(state.videoId, frame.path, name, "new_category");
+              persistFrameAnnotation(state.videoId, frame.path, name, "new_category", idToken);
             }
           }}
         />
@@ -163,10 +187,16 @@ export function ReviewPage({ videos }: ReviewPageProps) {
         videoIdx={videoIdx}
         totalVideos={videos.length}
         onPrevVideo={() => {
-          if (videoIdx > 0) dispatch({ type: "SET_VIDEO", payload: videos[videoIdx - 1].id });
+          if (videoIdx > 0) {
+            const v = videos[videoIdx - 1];
+            dispatch({ type: "SET_VIDEO", payload: { videoId: v.id, frames: v.frames } });
+          }
         }}
         onNextVideo={() => {
-          if (videoIdx < videos.length - 1) dispatch({ type: "SET_VIDEO", payload: videos[videoIdx + 1].id });
+          if (videoIdx < videos.length - 1) {
+            const v = videos[videoIdx + 1];
+            dispatch({ type: "SET_VIDEO", payload: { videoId: v.id, frames: v.frames } });
+          }
         }}
       />
     </div>

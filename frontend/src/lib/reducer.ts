@@ -1,4 +1,10 @@
-import type { ReviewState, ReviewAction, Category } from "./types";
+import type { ReviewState, ReviewAction, Category, Frame } from "./types";
+
+// Frames com status "detection" chegam da API já anotados (annotated_species presente).
+// Usado para semear o progresso real ao carregar/trocar de vídeo, em vez de assumir 0.
+function preAnnotatedIndices(frames: Frame[]): Set<number> {
+  return new Set(frames.filter((f) => f.status === "detection").map((f) => f.idx));
+}
 
 export const DEFAULT_CATEGORIES: Category[] = [
   { id: "aramides",     name: "Aramides" },
@@ -15,18 +21,21 @@ export const DEFAULT_CATEGORIES: Category[] = [
   { id: "anta",         name: "Anta" },
 ];
 
-export const initialState = (videoId: string, totalFrames: number): ReviewState => ({
-  query: "",
-  selected: null,
-  confirmed: false,
-  newCatOpen: false,
-  newCatName: "",
-  annotated: 0,
-  frameIdx: 1,
-  videoId,
-  categories: DEFAULT_CATEGORIES,
-  annotatedFrames: new Set(),
-});
+export const initialState = (videoId: string, frames: Frame[]): ReviewState => {
+  const annotatedFrames = preAnnotatedIndices(frames);
+  return {
+    query: "",
+    selected: null,
+    confirmed: false,
+    newCatOpen: false,
+    newCatName: "",
+    annotated: annotatedFrames.size,
+    frameIdx: 1,
+    videoId,
+    categories: DEFAULT_CATEGORIES,
+    annotatedFrames,
+  };
+};
 
 export function reviewReducer(state: ReviewState, action: ReviewAction): ReviewState {
   switch (action.type) {
@@ -61,8 +70,19 @@ export function reviewReducer(state: ReviewState, action: ReviewAction): ReviewS
     case "SKIP_FRAME":
       return { ...state, frameIdx: state.frameIdx + 1, selected: null, confirmed: false, query: "" };
 
-    case "SET_VIDEO":
-      return { ...state, videoId: action.payload, frameIdx: 1, selected: null, confirmed: false, query: "" };
+    case "SET_VIDEO": {
+      const annotatedFrames = preAnnotatedIndices(action.payload.frames);
+      return {
+        ...state,
+        videoId: action.payload.videoId,
+        frameIdx: 1,
+        selected: null,
+        confirmed: false,
+        query: "",
+        annotatedFrames,
+        annotated: annotatedFrames.size,
+      };
+    }
 
     case "OPEN_NEW_CAT":
       return { ...state, newCatOpen: true, newCatName: "" };

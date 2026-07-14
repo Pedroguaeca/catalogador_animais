@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Libre_Franklin, IBM_Plex_Sans, IBM_Plex_Mono } from "next/font/google";
+import Providers from "../src/components/Providers";
 import "./globals.css";
 
 const libreFranklin = Libre_Franklin({
@@ -28,7 +29,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="pt-BR" className={`${libreFranklin.variable} ${ibmPlexSans.variable} ${ibmPlexMono.variable}`}>
-      <body style={{ margin: 0, padding: 0 }}>{children}</body>
+      <body style={{ margin: 0, padding: 0 }}><Providers>{children}</Providers></body>
     </html>
   );
 }

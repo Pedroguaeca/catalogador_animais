@@ -228,7 +228,7 @@ export default function VideosPage() {
                         <td style={{ padding: "10px 14px" }}>
                           <div className="flex items-center gap-2">
                             <a
-                              href="/review"
+                              href={`/review?video=${v.video_id}`}
                               title="Abrir em Revisão"
                               style={{
                                 display: "flex", alignItems: "center", gap: 4,

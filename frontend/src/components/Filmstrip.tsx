@@ -70,7 +70,7 @@ export function Filmstrip({ frames, frameIdx, onSelect }: FilmstripProps) {
               }}
             >
               <img
-                src={`/api/image?p=${encodeURIComponent(f.path)}`}
+                src={f.imageUrl ?? `/api/image?p=${encodeURIComponent(f.path)}`}
                 alt={`Frame ${f.idx}`}
                 className="w-full h-full"
                 style={{ objectFit: "cover" }}

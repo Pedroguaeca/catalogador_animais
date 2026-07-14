@@ -57,7 +57,11 @@ export function FrameStage({ frame, zoom, onToggleZoom }: FrameStageProps) {
     // Quando zoom está ativo, recorta ao redor da bbox antes de exibir.
     // Nesse caso, o canvas mostra a imagem toda (sem crop no DOM),
     // então desenhamos a bbox sem ajuste extra de crop.
-    const [x1, y1, x2, y2] = det.bbox;
+    // bboxNormalized (pipeline AWS/MegaDetector): [x, y, w, h] em 0-1 → converte para pixel-space.
+    const [b0, b1, b2, b3] = det.bbox;
+    const [x1, y1, x2, y2] = det.bboxNormalized
+      ? [b0 * natW, b1 * natH, (b0 + b2) * natW, (b1 + b3) * natH]
+      : [b0, b1, b2, b3];
     const sx1 = x1 * scale + offsetX;
     const sy1 = y1 * scale + offsetY;
     const bw  = (x2 - x1) * scale;
@@ -128,7 +132,7 @@ export function FrameStage({ frame, zoom, onToggleZoom }: FrameStageProps) {
           {/* Imagem — contain para não cortar a bbox */}
           <img
             ref={imgRef}
-            src={`/api/image?p=${encodeURIComponent(frame.path)}`}
+            src={frame.imageUrl ?? `/api/image?p=${encodeURIComponent(frame.path)}`}
             alt={`Frame ${frame.idx}`}
             className="w-full h-full"
             style={{ objectFit: "contain" }}
