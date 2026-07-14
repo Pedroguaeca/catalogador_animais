@@ -23,6 +23,9 @@ interface VideoItem {
 function statusStyle(s: string): { bg: string; color: string } {
   if (s === "Revisado")           return { bg: "#EEF5F0", color: "#2F6B4F" };
   if (s === "Aguardando revisão") return { bg: "#FFF8EC", color: "#B45309" };
+  // "Sem detecção": estado terminal válido (vídeo processado, sem fauna) —
+  // cor neutra própria, distinta do cinza de "Processando" e do erro/vermelho.
+  if (s === "Sem detecção")       return { bg: "#EEF1F4", color: "#5B6B7A" };
   return                                  { bg: "#F1F0EE", color: "#6B6357" };
 }
 
@@ -283,6 +286,8 @@ export default function VideosPage() {
             <span>{videos.filter((v) => v.display_status === "Aguardando revisão").length} aguardando revisão</span>
             <span>·</span>
             <span>{videos.filter((v) => v.display_status === "Processando").length} a processar</span>
+            <span>·</span>
+            <span>{videos.filter((v) => v.display_status === "Sem detecção").length} sem detecção</span>
           </div>
         )}
 
