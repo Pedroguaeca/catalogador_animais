@@ -1,8 +1,8 @@
 "use client";
 
 import { signIn, useSession } from "next-auth/react";
-import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useState } from "react";
 
 const MAIN_ROUTE = "/dashboard";
 
@@ -13,11 +13,22 @@ function decodeBase64url(str: string): string {
 }
 
 export default function LoginPage() {
+  return (
+    <Suspense fallback={null}>
+      <LoginPageInner />
+    </Suspense>
+  );
+}
+
+function LoginPageInner() {
   const { status } = useSession();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [email,    setEmail]    = useState("");
   const [password, setPassword] = useState("");
-  const [error,    setError]    = useState<string | null>(null);
+  const [error,    setError]    = useState<string | null>(
+    searchParams.get("expired") ? "Sua sessão expirou. Entre novamente." : null
+  );
   const [loading,  setLoading]  = useState(false);
 
   useEffect(() => {

@@ -2,14 +2,19 @@
 
 import { useState } from "react";
 import { Download, CheckCircle2, Loader2, AlertCircle } from "lucide-react";
+import { useSession } from "next-auth/react";
 import { SiabNav } from "../../src/components/SiabNav";
+import { API_BASE, apiHeaders } from "../../src/lib/api";
 
 const PROJECTS  = ["projeto-junho-2026"];
-const API_BASE  = `/api/v1`;
 
 type ExportState = "idle" | "loading" | "done" | "error";
 
 export default function ExportPage() {
+  const { data: session } = useSession();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const idToken = (session as any)?.idToken as string | undefined;
+
   const [project,     setProject]     = useState(PROJECTS[0]);
   const [exportState, setExportState] = useState<ExportState>("idle");
   const [error,       setError]       = useState<string | null>(null);
@@ -21,7 +26,7 @@ export default function ExportPage() {
     setFilename(null);
 
     try {
-      const res = await fetch(`${API_BASE}/projects/${project}/appearances/export`);
+      const res = await fetch(`${API_BASE}/projects/${project}/appearances/export`, { headers: apiHeaders(idToken) });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
 
       // Extrai nome do arquivo do header Content-Disposition
@@ -34,7 +39,11 @@ export default function ExportPage() {
       const a    = document.createElement("a");
       a.href     = url;
       a.download = name;
+      // Precisa estar no DOM antes do .click() — alguns navegadores (Safari)
+      // ignoram silenciosamente o clique num <a> desanexado.
+      document.body.appendChild(a);
       a.click();
+      document.body.removeChild(a);
       URL.revokeObjectURL(url);
 
       setFilename(name);

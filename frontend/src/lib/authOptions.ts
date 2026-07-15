@@ -11,6 +11,7 @@ import { createHmac } from "crypto";
 const CLIENT_ID     = process.env.COGNITO_CLIENT_ID!;
 const CLIENT_SECRET = process.env.COGNITO_CLIENT_SECRET!;
 const REGION        = process.env.COGNITO_REGION ?? "us-east-1";
+const COGNITO_DOMAIN = process.env.COGNITO_DOMAIN ?? "https://siab-auth.auth.us-east-1.amazoncognito.com";
 
 const cognitoClient = new CognitoIdentityProviderClient({ region: REGION });
 
@@ -18,6 +19,44 @@ function secretHash(username: string): string {
   return createHmac("sha256", CLIENT_SECRET)
     .update(username + CLIENT_ID)
     .digest("base64");
+}
+
+// Renova o idToken via POST /oauth2/token (grant_type=refresh_token) do Hosted
+// UI do Cognito. Funciona para refresh_token emitido tanto pelo fluxo OAuth
+// (Google) quanto pelo USER_PASSWORD_AUTH (email/senha) — ambos usam o mesmo
+// app client, e o endpoint Hosted UI aceita refresh_token de qualquer origem
+// desde que o app client tenha os fluxos OAuth habilitados (já é o caso).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function refreshIdToken(token: any): Promise<any> {
+  try {
+    const params = new URLSearchParams({
+      grant_type:    "refresh_token",
+      client_id:     CLIENT_ID,
+      refresh_token: token.refreshToken,
+    });
+    const res = await fetch(`${COGNITO_DOMAIN}/oauth2/token`, {
+      method:  "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Authorization:  "Basic " + Buffer.from(`${CLIENT_ID}:${CLIENT_SECRET}`).toString("base64"),
+      },
+      body: params.toString(),
+    });
+    const refreshed = await res.json();
+    if (!res.ok) throw refreshed;
+
+    return {
+      ...token,
+      idToken:      refreshed.id_token,
+      expiresAt:    Math.floor(Date.now() / 1000) + refreshed.expires_in,
+      // Cognito nem sempre reemite refresh_token na renovação — mantém o antigo se ausente.
+      refreshToken: refreshed.refresh_token ?? token.refreshToken,
+      error:        undefined,
+    };
+  } catch (exc) {
+    console.error("Falha ao renovar idToken:", exc);
+    return { ...token, error: "RefreshAccessTokenError" };
+  }
 }
 
 // Decode a Cognito id_token without verifying the signature.
@@ -68,12 +107,14 @@ export const authOptions: NextAuthOptions = {
           if (!auth?.IdToken) throw new Error("Falha ao definir nova senha.");
           const claims = decodeIdToken(auth.IdToken);
           return {
-            id:       claims.sub as string,
-            email:    claims.email as string,
-            name:     (claims.name ?? claims.email) as string,
-            idToken:  auth.IdToken,
-            tenantId: claims["custom:tenant_id"] as string | undefined,
-            role:     claims["custom:role"]      as string | undefined,
+            id:           claims.sub as string,
+            email:        claims.email as string,
+            name:         (claims.name ?? claims.email) as string,
+            idToken:      auth.IdToken,
+            refreshToken: auth.RefreshToken,
+            expiresAt:    Math.floor(Date.now() / 1000) + (auth.ExpiresIn ?? 3600),
+            tenantId:     claims["custom:tenant_id"] as string | undefined,
+            role:         claims["custom:role"]      as string | undefined,
           };
         }
 
@@ -113,12 +154,14 @@ export const authOptions: NextAuthOptions = {
 
         const claims = decodeIdToken(auth.IdToken);
         return {
-          id:       claims.sub as string,
-          email:    claims.email as string,
-          name:     (claims.name ?? claims.email) as string,
-          idToken:  auth.IdToken,
-          tenantId: claims["custom:tenant_id"] as string | undefined,
-          role:     claims["custom:role"]      as string | undefined,
+          id:           claims.sub as string,
+          email:        claims.email as string,
+          name:         (claims.name ?? claims.email) as string,
+          idToken:      auth.IdToken,
+          refreshToken: auth.RefreshToken,
+          expiresAt:    Math.floor(Date.now() / 1000) + (auth.ExpiresIn ?? 3600),
+          tenantId:     claims["custom:tenant_id"] as string | undefined,
+          role:         claims["custom:role"]      as string | undefined,
         };
       },
     }),
@@ -133,19 +176,43 @@ export const authOptions: NextAuthOptions = {
         // Google flow — custom attributes come from the OIDC profile
         token.idToken  = account.id_token;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (token as any).refreshToken = account.refresh_token;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (token as any).expiresAt    = account.expires_at;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         token.tenantId = (profile as any)?.["custom:tenant_id"] as string | undefined;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         token.role     = (profile as any)?.["custom:role"]      as string | undefined;
-      } else if (account?.type === "credentials" && user) {
+        return token;
+      }
+      if (account?.type === "credentials" && user) {
         // Credentials flow — authorize() decoded the id_token and attached attributes to user
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         token.idToken  = (user as any).idToken;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (token as any).refreshToken = (user as any).refreshToken;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (token as any).expiresAt    = (user as any).expiresAt;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         token.tenantId = (user as any).tenantId;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         token.role     = (user as any).role;
+        return token;
       }
-      return token;
+
+      // Chamadas subsequentes (sem account/user novos) — renova silenciosamente
+      // se o idToken já expirou ou expira em menos de 5min (EARS-4).
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const t = token as any;
+      const expiresAt  = t.expiresAt ?? 0;
+      const fiveMinutes = 5 * 60;
+      if (Date.now() / 1000 < expiresAt - fiveMinutes) {
+        return token;
+      }
+      if (!t.refreshToken) {
+        return { ...token, error: "RefreshAccessTokenError" };
+      }
+      return refreshIdToken(token);
     },
     async session({ session, token }) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -154,6 +221,8 @@ export const authOptions: NextAuthOptions = {
       (session as any).tenantId = token.tenantId;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (session as any).role     = token.role;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (session as any).error    = (token as any).error;
       return session;
     },
   },
