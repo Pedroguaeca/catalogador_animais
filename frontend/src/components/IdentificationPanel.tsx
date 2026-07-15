@@ -1,7 +1,7 @@
 "use client";
 
-import { useRef, useEffect } from "react";
-import { Search, X, Sparkles, Check, ChevronLeft, ChevronRight, SkipForward, Film } from "lucide-react";
+import { useRef, useEffect, useState } from "react";
+import { Search, X, Sparkles, Check, ChevronLeft, ChevronRight, SkipForward, Film, PencilLine } from "lucide-react";
 import type { Detection, Category } from "../lib/types";
 
 interface IdentificationPanelProps {
@@ -57,6 +57,19 @@ export function IdentificationPanel({
     if (newCatOpen) newCatInputRef.current?.focus();
   }, [newCatOpen]);
 
+  // Distingue qual dos dois botões de confirmação foi clicado — `confirmed`
+  // (vindo do reducer) é compartilhado entre confirmar-frame e
+  // confirmar-vídeo, mas o feedback textual precisa ser específico por botão.
+  const [justConfirmed, setJustConfirmed] = useState<"frame" | "video" | null>(null);
+
+  useEffect(() => {
+    if (!confirmed) setJustConfirmed(null);
+  }, [confirmed]);
+
+  useEffect(() => {
+    setJustConfirmed(null);
+  }, [frameIdx]);
+
   const filtered = query
     ? categories.filter((c) =>
         c.name.toLowerCase().includes(query.toLowerCase())
@@ -70,10 +83,6 @@ export function IdentificationPanel({
   const aiCategoryId = categories.find(
     (c) => c.name.toLowerCase() === aiPt?.toLowerCase()
   )?.id ?? null;
-
-  const confirmLabel = selected
-    ? (categories.find((c) => c.id === selected)?.name ?? aiPt)
-    : aiPt;
 
   const font = { fontFamily: "IBM Plex Sans, sans-serif" };
   const labelStyle: React.CSSProperties = {
@@ -157,61 +166,72 @@ export function IdentificationPanel({
 
       {/* ── Faixa de ações + navegação de frame ────────── */}
       <div className="px-4 pb-3 flex flex-col gap-2 shrink-0">
-        {/* Confirmar / Confirmar vídeo / Rejeitar — só com detecção */}
+        {/* Confirmar frame / Confirmar vídeo / Corrigir — só com detecção */}
         {detection && (
-          <div className="flex gap-2 items-stretch">
+          <div className="flex gap-2 items-center flex-wrap">
+            {/* Confirmar este frame — compacto: ação mais frequente, não pode
+                ocupar espaço desproporcional nem competir com o botão de vídeo */}
             <button
-              onClick={onConfirmAI}
-              className="flex-1 flex items-center justify-center gap-1.5 text-sm font-semibold text-white"
+              onClick={() => { onConfirmAI(); setJustConfirmed("frame"); }}
+              title="Marca só este frame como revisado — os outros continuam pendentes"
+              className="flex items-center justify-center gap-1.5 font-semibold"
               style={{
-                background: confirmed ? "#3E8E63" : "#2F6B4F",
+                background: "#E8F5EE",
+                color: "#2D8B5F",
                 borderRadius: 10,
-                padding: "9px 12px",
+                padding: "8px 14px",
+                fontSize: 13,
                 transition: "background 0.15s",
                 ...font,
               }}
-              onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "#3E8E63")}
-              onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = confirmed ? "#3E8E63" : "#2F6B4F")}
+              onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "#D9EEE3")}
+              onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "#E8F5EE")}
             >
-              {confirmed && <Check size={13} style={{ color: "#A9E8C2" }} />}
-              Confirmar {confirmLabel}
-              <kbd className="text-xs rounded px-1 py-0.5" style={{ background: "rgba(255,255,255,0.2)", fontFamily: "IBM Plex Mono, monospace" }}>⏎</kbd>
+              {justConfirmed === "frame" && <Check size={13} />}
+              {justConfirmed === "frame" ? "Frame confirmado" : "Confirmar este frame"}
+              <kbd className="text-xs rounded px-1 py-0.5" style={{ background: "rgba(45,139,95,0.12)", fontFamily: "IBM Plex Mono, monospace" }}>⏎</kbd>
             </button>
 
+            {/* Confirmar vídeo inteiro — maior: ação de mais peso, menos frequente,
+                precisa se destacar mais que "Confirmar este frame" */}
             <button
-              onClick={onConfirmVideo}
-              className="flex items-center justify-center gap-1.5 text-xs font-medium"
+              onClick={() => { onConfirmVideo(); setJustConfirmed("video"); }}
+              title="Aplica esta espécie a todos os frames deste vídeo de uma vez"
+              className="flex items-center justify-center gap-2 font-semibold"
               style={{
-                padding: "9px 11px", borderRadius: 10,
-                background: "#EFF6FF", color: "#2563EB",
-                border: "1.5px solid #BFDBFE",
+                padding: "11px 18px", borderRadius: 11,
+                background: "#2D8B5F", color: "#FFFFFF",
+                fontSize: 14,
                 transition: "background 0.15s",
                 ...font,
               }}
-              title="Confirmar para todos os frames do vídeo (⇧⏎)"
-              onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "#DBEAFE")}
-              onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "#EFF6FF")}
+              onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "#256E4B")}
+              onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "#2D8B5F")}
             >
-              <Film size={13} />
-              Vídeo
-              <kbd className="text-xs rounded px-1" style={{ background: "rgba(37,99,235,0.12)", fontFamily: "IBM Plex Mono, monospace" }}>⇧⏎</kbd>
+              {justConfirmed === "video" ? <Check size={15} /> : <Film size={15} />}
+              {justConfirmed === "video" ? "Vídeo confirmado" : "Confirmar vídeo inteiro"}
+              <kbd className="text-xs rounded px-1" style={{ background: "rgba(255,255,255,0.2)", fontFamily: "IBM Plex Mono, monospace" }}>⇧⏎</kbd>
             </button>
 
+            {/* Corrigir — mesmo peso compacto de "Confirmar este frame": é
+                alternativa, não deve competir visualmente */}
             <button
               onClick={onReject}
-              className="flex items-center justify-center"
+              title="Escolhe outra espécie para este frame"
+              className="flex items-center justify-center gap-1.5 font-semibold"
               style={{
-                width: 36, flexShrink: 0,
-                borderRadius: 10,
-                border: "1.5px solid #E7DECF",
-                background: "#fff", color: "#6B6357",
-                transition: "background 0.15s, color 0.15s",
+                padding: "8px 14px", borderRadius: 10,
+                border: "1.5px solid #2D8B5F",
+                background: "#FFFFFF", color: "#2D8B5F",
+                fontSize: 13,
+                transition: "background 0.15s",
+                ...font,
               }}
-              title="Rejeitar sugestão da IA"
-              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = "#FEF2EF"; (e.currentTarget as HTMLElement).style.color = "#C2503A"; }}
-              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = "#fff"; (e.currentTarget as HTMLElement).style.color = "#6B6357"; }}
+              onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "#F2FAF6")}
+              onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "#FFFFFF")}
             >
-              <X size={14} />
+              <PencilLine size={13} />
+              Não é isso? Corrigir
             </button>
           </div>
         )}

@@ -12,7 +12,9 @@ import type { Video, Frame } from "../../src/lib/types";
 const PROJECT_ID = "projeto-junho-2026";
 
 interface ApiVideoItem {
-  video_id: string;
+  video_id:          string;
+  original_filename: string | null;
+  display_status:    string;
 }
 
 interface ApiFrameItem {
@@ -78,9 +80,21 @@ function ReviewPageDataLoader() {
             `${API_BASE}/projects/${PROJECT_ID}/videos/${v.video_id}/frames`,
             { headers: apiHeaders(idToken) },
           );
-          if (!r.ok) return { id: v.video_id, frames: [] };
+          if (!r.ok) {
+            return {
+              id: v.video_id,
+              original_filename: v.original_filename,
+              display_status:    v.display_status,
+              frames: [],
+            };
+          }
           const d = await r.json();
-          return { id: v.video_id, frames: mapFrames(d.frames ?? []) };
+          return {
+            id: v.video_id,
+            original_filename: v.original_filename,
+            display_status:    v.display_status,
+            frames: mapFrames(d.frames ?? []),
+          };
         }));
 
         if (!cancelled) setVideos(withFrames);

@@ -1,6 +1,6 @@
 "use client";
 
-import { useReducer, useEffect, useState, useCallback } from "react";
+import { useReducer, useEffect, useState, useCallback, useRef } from "react";
 import { reviewReducer, initialState } from "../lib/reducer";
 import type { Video } from "../lib/types";
 import { TopBar } from "./TopBar";
@@ -8,6 +8,7 @@ import { FrameStage } from "./FrameStage";
 import { Filmstrip } from "./Filmstrip";
 import { IdentificationPanel } from "./IdentificationPanel";
 import { BottomBar } from "./BottomBar";
+import { CompletionCelebration } from "./CompletionCelebration";
 
 import { useSession } from "next-auth/react";
 import { API_BASE, apiHeaders } from "../lib/api";
@@ -99,14 +100,43 @@ export function ReviewPage({ videos, initialVideoId, projectId }: ReviewPageProp
     }
   }, [state.annotatedFrames, totalFrames]);
 
+  // Celebração: só quando o vídeo ATUAL vira totalmente revisado (transição
+  // "aguardando revisão" → "revisado"), nunca a cada frame confirmado.
+  // `null` = ainda não sabemos o estado anterior deste vídeo (troca/carregamento
+  // inicial) — evita comemorar por engano ao entrar num vídeo já completo.
+  const [celebrate, setCelebrate] = useState(false);
+  const prevFullyAnnotatedRef = useRef<boolean | null>(null);
+
+  useEffect(() => {
+    prevFullyAnnotatedRef.current = null;
+  }, [state.videoId]);
+
+  useEffect(() => {
+    const isFull = totalFrames > 0 && state.annotated >= totalFrames;
+    const prev = prevFullyAnnotatedRef.current;
+    if (prev === false && isFull) {
+      setCelebrate(true);
+      const t = setTimeout(() => setCelebrate(false), 500);
+      prevFullyAnnotatedRef.current = isFull;
+      return () => clearTimeout(t);
+    }
+    prevFullyAnnotatedRef.current = isFull;
+  }, [state.annotated, totalFrames]);
+
   return (
     <div
       className="flex flex-col flex-1 min-h-0 overflow-hidden"
       style={{ background: "#FAF6EE", fontFamily: "IBM Plex Sans, sans-serif" }}
     >
+      <CompletionCelebration active={celebrate} />
+
       <TopBar
         videoId={state.videoId}
-        videos={videos.map((v) => v.id)}
+        videos={videos.map((v) => ({
+          id: v.id,
+          label: v.original_filename || v.id,
+          display_status: v.display_status,
+        }))}
         frameIdx={state.frameIdx}
         totalFrames={totalFrames}
         videoIdx={videoIdx}

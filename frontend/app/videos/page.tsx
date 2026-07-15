@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useSession } from "next-auth/react";
 import { SiabNav } from "../../src/components/SiabNav";
 import { API_BASE, apiHeaders } from "../../src/lib/api";
+import { statusStyle } from "../../src/lib/statusColors";
 import { Film, Trash2, ExternalLink, Loader2, RefreshCw, AlertCircle } from "lucide-react";
 
 const PROJECT_ID = "projeto-junho-2026";
@@ -18,15 +19,6 @@ interface VideoItem {
   display_status:    string;
   species:           string[];
   appearance_count:  number;
-}
-
-function statusStyle(s: string): { bg: string; color: string } {
-  if (s === "Revisado")           return { bg: "#EEF5F0", color: "#2F6B4F" };
-  if (s === "Aguardando revisão") return { bg: "#FFF8EC", color: "#B45309" };
-  // "Sem detecção": estado terminal válido (vídeo processado, sem fauna) —
-  // cor neutra própria, distinta do cinza de "Processando" e do erro/vermelho.
-  if (s === "Sem detecção")       return { bg: "#EEF1F4", color: "#5B6B7A" };
-  return                                  { bg: "#F1F0EE", color: "#6B6357" };
 }
 
 function formatDate(iso: string | null): string {

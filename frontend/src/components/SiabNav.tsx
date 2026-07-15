@@ -2,12 +2,13 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { UploadCloud, ClipboardList, Download, LayoutGrid, BarChart2, LogOut, Film } from "lucide-react";
+import { UploadCloud, ClipboardList, Download, BarChart2, LogOut, Film } from "lucide-react";
 import { useSession, signOut } from "next-auth/react";
 
+// "Anotação" (rota "/") removida do menu — absorvida pelo /review (navegação
+// por vídeo, frame a frame). Rota/código permanecem intactos, só saíram daqui.
 const links = [
   { href: "/upload",    label: "Upload",     icon: UploadCloud },
-  { href: "/",          label: "Anotação",   icon: LayoutGrid },
   { href: "/review",    label: "Revisão",    icon: ClipboardList },
   { href: "/videos",    label: "Vídeos",     icon: Film },
   { href: "/dashboard", label: "Dashboard",  icon: BarChart2 },

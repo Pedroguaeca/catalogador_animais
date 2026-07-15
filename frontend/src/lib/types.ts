@@ -21,6 +21,8 @@ export interface Frame {
 
 export interface Video {
   id: string;   // e.g. "Cutia_Cam2Pos2_03"
+  original_filename?: string | null;
+  display_status?: string; // mesmos valores de GET /videos: Processando/Aguardando revisão/Revisado/Sem detecção
   frames: Frame[];
 }
 
