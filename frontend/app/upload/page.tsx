@@ -4,7 +4,7 @@ import { useCallback, useRef, useState } from "react";
 import {
   UploadCloud, CheckCircle2, XCircle, Loader2, Clock, X,
 } from "lucide-react";
-import { useSession } from "next-auth/react";
+import { getSession } from "next-auth/react";
 import { SiabNav } from "../../src/components/SiabNav";
 import { API_BASE } from "../../src/lib/api";
 
@@ -42,11 +42,38 @@ function toItems(files: File[]): FileItem[] {
   }));
 }
 
+// Busca uma sessão fresca a cada chamada autenticada, em vez de reusar um
+// idToken capturado uma única vez no início do lote inteiro — num lote de
+// vários vídeos grandes, o upload de um item sozinho já pode levar tempo
+// suficiente pro token expirar no meio do caminho.
+async function freshAuthHeader(): Promise<Record<string, string>> {
+  const session = await getSession();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const token = (session as any)?.idToken as string | undefined;
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+// Telemetria mínima, best-effort: registra no servidor uma falha de upload
+// detectada no navegador. Nunca lança, nunca bloqueia — só deixa rastro,
+// já que hoje esses erros só existem no estado React e se perdem se a aba
+// fechar antes de alguém ver.
+function reportUploadFailed(
+  project: string,
+  videoId: string | null,
+  stage: "put" | "confirm" | "unknown",
+  message: string,
+  authHeader: Record<string, string>,
+) {
+  if (!videoId) return; // falhou antes de existir um video_id — nada a anotar
+  fetch(`${API_BASE}/projects/${project}/videos/${videoId}/upload-failed`, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json", ...authHeader },
+    body:    JSON.stringify({ stage, message: message.slice(0, 500) }),
+  }).catch(() => {});
+}
+
 export default function UploadPage() {
   const inputRef = useRef<HTMLInputElement>(null);
-  const { data: session } = useSession();
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const idToken = (session as any)?.idToken as string | undefined;
 
   const [project,  setProject]  = useState(PROJECTS[0]);
   const [items,    setItems]    = useState<FileItem[]>([]);
@@ -74,17 +101,19 @@ export default function UploadPage() {
   const patch = (id: string, update: Partial<FileItem>) =>
     setItems((prev) => prev.map((i) => (i.id === id ? { ...i, ...update } : i)));
 
-  const uploadOne = (item: FileItem, token: string | undefined): Promise<void> =>
+  const uploadOne = (item: FileItem): Promise<void> =>
     new Promise((resolve) => {
       (async () => {
+        let videoId: string | null = null;
         try {
           patch(item.id, { status: "uploading", progress: 0 });
-          const authHeader: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
 
-          // Passo 1 — obtém URL pré-assinada do S3
+          // Passo 1 — obtém URL pré-assinada do S3 (sessão buscada agora, não
+          // reusada de um idToken capturado no início do lote inteiro)
+          const authHeader1 = await freshAuthHeader();
           const urlResp = await fetch(`${API_BASE}/projects/${project}/videos/upload-url`, {
             method: "POST",
-            headers: { "Content-Type": "application/json", ...authHeader },
+            headers: { "Content-Type": "application/json", ...authHeader1 },
             body: JSON.stringify({
               filename:     item.file.name,
               content_type: item.file.type || "video/x-msvideo",
@@ -97,38 +126,52 @@ export default function UploadPage() {
           const { video_id, upload_url, s3_key } = await urlResp.json() as {
             video_id: string; upload_url: string; s3_key: string;
           };
+          videoId = video_id;
 
           // Passo 2 — PUT direto ao S3 com barra de progresso real
-          await new Promise<void>((res2, rej2) => {
-            const xhr = new XMLHttpRequest();
-            xhr.upload.onprogress = (e) => {
-              if (e.lengthComputable)
-                patch(item.id, { progress: Math.round((e.loaded / e.total) * 100) });
-            };
-            xhr.onload = () => {
-              if (xhr.status >= 200 && xhr.status < 300) res2();
-              else rej2(new Error(`S3 retornou ${xhr.status}: ${xhr.responseText}`));
-            };
-            xhr.onerror = () => rej2(new Error("Erro de rede no upload para S3."));
-            xhr.open("PUT", upload_url);
-            // Content-Type deve bater com o informado ao gerar a URL pré-assinada
-            xhr.setRequestHeader("Content-Type", item.file.type || "video/x-msvideo");
-            xhr.send(item.file);
-          });
+          try {
+            await new Promise<void>((res2, rej2) => {
+              const xhr = new XMLHttpRequest();
+              xhr.upload.onprogress = (e) => {
+                if (e.lengthComputable)
+                  patch(item.id, { progress: Math.round((e.loaded / e.total) * 100) });
+              };
+              xhr.onload = () => {
+                if (xhr.status >= 200 && xhr.status < 300) res2();
+                else rej2(new Error(`S3 retornou ${xhr.status}: ${xhr.responseText}`));
+              };
+              xhr.onerror = () => rej2(new Error("Erro de rede no upload para S3."));
+              xhr.open("PUT", upload_url);
+              // Content-Type deve bater com o informado ao gerar a URL pré-assinada
+              xhr.setRequestHeader("Content-Type", item.file.type || "video/x-msvideo");
+              xhr.send(item.file);
+            });
+          } catch (putErr) {
+            const msg = putErr instanceof Error ? putErr.message : "Erro desconhecido no envio ao S3.";
+            reportUploadFailed(project, videoId, "put", msg, await freshAuthHeader().catch(() => ({})));
+            patch(item.id, { status: "error", error: msg });
+            return resolve();
+          }
 
-          // Passo 3 — confirma upload e dispara pipeline
+          // Passo 3 — confirma upload e dispara pipeline (sessão buscada de novo:
+          // o PUT de um arquivo grande pode ter levado tempo suficiente pro
+          // token do passo 1 já não valer mais)
+          const authHeader3 = await freshAuthHeader();
           const confirmResp = await fetch(
             `${API_BASE}/projects/${project}/videos/${video_id}/confirm`,
-            { method: "POST", headers: authHeader },
+            { method: "POST", headers: authHeader3 },
           );
           if (!confirmResp.ok) {
-            patch(item.id, { status: "error", error: `Erro ao confirmar: ${await confirmResp.text()}` });
+            const msg = `Erro ao confirmar: ${await confirmResp.text()}`;
+            reportUploadFailed(project, videoId, "confirm", msg, authHeader3);
+            patch(item.id, { status: "error", error: msg });
             return resolve();
           }
 
           patch(item.id, { status: "done", progress: 100, result: { video_id, s3_key } });
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : "Erro desconhecido.";
+          reportUploadFailed(project, videoId, "unknown", msg, await freshAuthHeader().catch(() => ({})));
           patch(item.id, { status: "error", error: msg });
         }
         resolve();
@@ -140,7 +183,7 @@ export default function UploadPage() {
     if (!pending.length) return;
     setRunning(true);
     for (const item of pending) {
-      await uploadOne(item, idToken);
+      await uploadOne(item);
     }
     setRunning(false);
   };

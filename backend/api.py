@@ -27,7 +27,7 @@ import urllib.request
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
@@ -70,11 +70,17 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
+        "http://localhost:3001",
         "http://localhost:8080",
         "http://localhost:8501",
+        "https://frontend-siab.vercel.app",
+        "https://frontend-beta-seven-49.vercel.app",
     ],
     allow_methods=["*"],
     allow_headers=["*"],
+    # Sem isso, o browser descarta Content-Disposition em respostas
+    # cross-origin — o download de CSV nunca vê o nome de arquivo sugerido.
+    expose_headers=["Content-Disposition"],
 )
 
 # ── Factories AWS (substituíveis em testes via patch) ─────────────────────────
@@ -114,6 +120,11 @@ def _videos_table():
 class UploadUrlRequest(BaseModel):
     filename:     str
     content_type: str = "video/x-msvideo"
+
+
+class UploadFailedRequest(BaseModel):
+    stage:   Literal["put", "confirm", "unknown"]
+    message: str
 
 
 class ReviewRequest(BaseModel):
@@ -468,16 +479,27 @@ def _ensure_camera(tenant_id: str, project_id: str, camera_id: str) -> bool:
 
 def _check_discrepancy(appearance_id: str, app_sk: str, tenant_id: str) -> None:
     """Flagga uma aparição quando suas anotações de frame divergem de espécie."""
-    app_tbl = _appearances_table()
-    ann_tbl = _frame_annotations_table()
+    app_tbl  = _appearances_table()
+    ann_tbl  = _frame_annotations_table()
+
+    app_item = _find_appearance(app_tbl, tenant_id, appearance_id)
+    if not app_item:
+        return
+    video_id    = app_item.get("video_id", "")
+    frame_start = int(app_item.get("frame_start", 0))
+    frame_end   = int(app_item.get("frame_end", frame_start))
 
     ann_resp = ann_tbl.query(
         KeyConditionExpression=(
             Key("tenant_id").eq(tenant_id)
-            & Key("appearance_id#frame_idx").begins_with(f"{appearance_id}#")
+            & Key("video_id#frame_idx").between(
+                f"{video_id}#{frame_start:05d}",
+                f"{video_id}#{frame_end:05d}",
+            )
         )
     )
-    species_set = {a["annotated_species"] for a in ann_resp.get("Items", [])}
+    annotated   = [a for a in ann_resp.get("Items", []) if a.get("annotated_species")]
+    species_set = {a["annotated_species"] for a in annotated}
 
     if len(species_set) > 1:
         app_tbl.update_item(
@@ -593,6 +615,38 @@ def confirm_upload(
 
     logger.info("Upload confirmado | tenant=%s project=%s video_id=%s", tenant_id, project_id, video_id)
     return {"video_id": video_id, "status": "processing"}
+
+
+@app.post("/projects/{project_id}/videos/{video_id}/upload-failed")
+def report_upload_failed(
+    project_id: str,
+    video_id:   str,
+    body:       UploadFailedRequest,
+    tenant_id:  str = Depends(get_current_tenant),
+):
+    """Telemetria mínima: registra no registro do vídeo uma falha de upload
+    detectada no navegador (PUT ao S3 ou confirm), que hoje só existe no
+    estado React do cliente e se perde se a aba fechar. Best-effort — não
+    bloqueia nem impede nova tentativa; só deixa rastro no servidor.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        _videos_table().update_item(
+            Key={"tenant_id": tenant_id, "project_id#video_id": f"{project_id}#{video_id}"},
+            UpdateExpression="SET upload_error = :m, upload_error_stage = :s, upload_error_at = :t",
+            ExpressionAttributeValues={
+                ":m": body.message[:500],
+                ":s": body.stage,
+                ":t": now,
+            },
+        )
+        logger.warning(
+            "Upload falhou (reportado pelo cliente) | tenant=%s video_id=%s stage=%s msg=%s",
+            tenant_id, video_id, body.stage, body.message[:200],
+        )
+    except Exception as exc:
+        logger.warning("Falha ao registrar upload-failed | video_id=%s: %s", video_id, exc)
+    return {"status": "ok"}
 
 
 # ── Endpoints 2-4 — Câmeras ───────────────────────────────────────────────────
@@ -830,25 +884,25 @@ def annotate_frame(
     annotated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     ann_tbl = _frame_annotations_table()
 
-    matched = _appearances_for_frame(body.video_id, frame_idx, tenant_id)
-    if not matched:
-        return {"status": "no_appearance", "frame_idx": frame_idx}
+    ann_tbl.put_item(Item={
+        "tenant_id":          tenant_id,
+        "video_id#frame_idx": f"{body.video_id}#{frame_idx:05d}",
+        "video_id":           body.video_id,
+        "frame_path":         body.frame_path,
+        "frame_s3_key":       frame_s3_key,
+        "frame_idx":          frame_idx,
+        "annotated_species":  body.annotated_species,
+        "annotation_source":  body.annotation_source,
+        "annotated_at":       annotated_at,
+    })
 
+    matched = _appearances_for_frame(body.video_id, frame_idx, tenant_id)
     for app_item in matched:
-        appearance_id = app_item.get("appearance_id", "")
-        app_sk        = app_item["video_id#appearance_id"]
-        ann_tbl.put_item(Item={
-            "tenant_id":              tenant_id,
-            "appearance_id#frame_idx": f"{appearance_id}#{frame_idx:05d}",
-            "appearance_id":          appearance_id,
-            "frame_path":             body.frame_path,
-            "frame_s3_key":           frame_s3_key,
-            "frame_idx":              frame_idx,
-            "annotated_species":      body.annotated_species,
-            "annotation_source":      body.annotation_source,
-            "annotated_at":           annotated_at,
-        })
-        _check_discrepancy(appearance_id, app_sk, tenant_id)
+        _check_discrepancy(
+            app_item.get("appearance_id", ""),
+            app_item["video_id#appearance_id"],
+            tenant_id,
+        )
 
     return {"status": "ok", "frame_idx": frame_idx, "appearances_updated": len(matched)}
 
@@ -867,14 +921,19 @@ def get_frame_annotations(
     app_item  = _find_appearance(app_tbl, tenant_id, appearance_id)
     if not app_item:
         raise HTTPException(status_code=404, detail="Aparição não encontrada")
-    f_start = int(app_item.get("frame_start", 0))
-    f_end   = int(app_item.get("frame_end", f_start))
+    f_start  = int(app_item.get("frame_start", 0))
+    f_end    = int(app_item.get("frame_end", f_start))
+    video_id = app_item.get("video_id", "")
 
     ann_resp = ann_tbl.query(
         KeyConditionExpression=(
             Key("tenant_id").eq(tenant_id)
-            & Key("appearance_id#frame_idx").begins_with(f"{appearance_id}#")
-        )
+            & Key("video_id#frame_idx").between(
+                f"{video_id}#{f_start:05d}",
+                f"{video_id}#{f_end:05d}",
+            )
+        ),
+        FilterExpression=Attr("annotated_species").exists(),
     )
     items = sorted(ann_resp.get("Items", []), key=lambda x: int(x.get("frame_idx", 0)))
     result = [
@@ -890,7 +949,106 @@ def get_frame_annotations(
     }
 
 
-# ── Endpoint 6 — Dashboard stats ─────────────────────────────────────────────
+# ── Endpoint 6 — Frames de vídeo (AI + humanas) ──────────────────────────────
+
+
+@app.get("/projects/{project_id}/videos/{video_id}/frames")
+def list_video_frames(
+    project_id: str,
+    video_id:   str,
+    tenant_id:  str = Depends(get_current_tenant),
+):
+    """Retorna anotações AI + humanas por frame de um vídeo, com presigned URLs."""
+    ann_tbl = _frame_annotations_table()
+
+    items: list[dict] = []
+    kwargs: dict = {
+        "KeyConditionExpression": (
+            Key("tenant_id").eq(tenant_id)
+            & Key("video_id#frame_idx").begins_with(f"{video_id}#")
+        ),
+    }
+    while True:
+        resp = ann_tbl.query(**kwargs)
+        items.extend(resp.get("Items", []))
+        lek = resp.get("LastEvaluatedKey")
+        if not lek:
+            break
+        kwargs["ExclusiveStartKey"] = lek
+
+    items.sort(key=lambda x: int(x.get("frame_idx", 0)))
+    result = []
+    for it in items:
+        cleaned = _clean(it)
+        cleaned["thumbnail_url"] = _presigned_url(it.get("frame_s3_key", ""))
+        result.append(cleaned)
+
+    return {"project_id": project_id, "video_id": video_id, "count": len(result), "frames": result}
+
+
+# ── Endpoint 7 — Confirmar todos os frames de um vídeo ───────────────────────
+
+
+@app.post("/projects/{project_id}/videos/{video_id}/confirm-all")
+def confirm_all_frames(
+    project_id: str,
+    video_id:   str,
+    tenant_id:  str = Depends(get_current_tenant),
+):
+    """Confirma a classificação AI para todos os frames sem anotação humana."""
+    ann_tbl = _frame_annotations_table()
+
+    items: list[dict] = []
+    kwargs: dict = {
+        "KeyConditionExpression": (
+            Key("tenant_id").eq(tenant_id)
+            & Key("video_id#frame_idx").begins_with(f"{video_id}#")
+        ),
+    }
+    while True:
+        resp = ann_tbl.query(**kwargs)
+        items.extend(resp.get("Items", []))
+        lek = resp.get("LastEvaluatedKey")
+        if not lek:
+            break
+        kwargs["ExclusiveStartKey"] = lek
+
+    confirmed  = 0
+    skipped    = 0
+    annotated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+    for it in items:
+        if it.get("annotated_species"):
+            skipped += 1
+            continue
+        ai_species = it.get("ai_species")
+        if not ai_species:
+            skipped += 1
+            continue
+        try:
+            ann_tbl.update_item(
+                Key={
+                    "tenant_id":          tenant_id,
+                    "video_id#frame_idx": it["video_id#frame_idx"],
+                },
+                UpdateExpression=(
+                    "SET annotated_species = :s, annotation_source = :src, annotated_at = :at"
+                ),
+                ConditionExpression=Attr("annotated_species").not_exists(),
+                ExpressionAttributeValues={
+                    ":s":   ai_species,
+                    ":src": "auto",
+                    ":at":  annotated_at,
+                },
+            )
+            confirmed += 1
+        except ann_tbl.meta.client.exceptions.ConditionalCheckFailedException:
+            skipped += 1
+
+    return {"status": "ok", "video_id": video_id, "confirmed": confirmed, "skipped": skipped}
+
+
+# ── Endpoint 8 — Dashboard stats ─────────────────────────────────────────────
 
 
 @app.get("/projects/{project_id}/stats")
@@ -1122,23 +1280,51 @@ def list_videos(
             break
         kwargs["ExclusiveStartKey"] = lek
 
-    # Busca todas as aparições do projecto de uma vez (evita N+1)
+    # Busca todas as aparições do projecto de uma vez (para species/count)
     appearances = _appearances_from_project(_appearances_table(), tenant_id, project_id)
     by_video: dict[str, list[dict]] = {}
     for a in appearances:
         by_video.setdefault(a.get("video_id", ""), []).append(a)
 
-    def _display_status(vid_status: str, apps: list[dict]) -> str:
-        if not apps:
-            return "Processando"
-        if all(a.get("review_status") in ("confirmed", "rejected") for a in apps):
-            return "Revisado"
-        return "Aguardando revisão"
+    # Busca anotações de frame do tenant para calcular display_status por vídeo
+    ann_tbl = _frame_annotations_table()
+    frame_anns: list[dict] = []
+    ann_kwargs: dict = {"KeyConditionExpression": Key("tenant_id").eq(tenant_id)}
+    while True:
+        resp = ann_tbl.query(**ann_kwargs)
+        frame_anns.extend(resp.get("Items", []))
+        lek = resp.get("LastEvaluatedKey")
+        if not lek:
+            break
+        ann_kwargs["ExclusiveStartKey"] = lek
+    anns_by_video: dict[str, list[dict]] = {}
+    for fa in frame_anns:
+        anns_by_video.setdefault(fa.get("video_id", ""), []).append(fa)
+
+    def _display_status(
+        frame_annotations: list[dict],
+        total_frames: Any,
+        frames_processed_count: Any,
+    ) -> str:
+        if frame_annotations:
+            if all(a.get("annotated_species") for a in frame_annotations):
+                return "Revisado"
+            return "Aguardando revisão"
+        # Sem frame-annotations ainda: distingue "ainda processando" de
+        # "processado, sem detecção de fauna" (estado terminal, não é erro)
+        # comparando frames_processed_count (megadetector_handler.py, ADD
+        # atômico por invocação) com total_frames (gravado pelo ingester.py
+        # ao terminar a extração). Se total_frames ainda não foi gravado
+        # (vídeo antigo ou falha antes da extração), assume "Processando".
+        if total_frames and (frames_processed_count or 0) >= total_frames:
+            return "Sem detecção"
+        return "Processando"
 
     result = []
     for v in sorted(vids, key=lambda x: x.get("captured_at") or x.get("uploaded_at") or ""):
         vid_id = v.get("video_id", "")
         apps   = by_video.get(vid_id, [])
+        anns   = anns_by_video.get(vid_id, [])
         result.append(_clean({
             "video_id":          vid_id,
             "original_filename": v.get("original_filename"),
@@ -1146,7 +1332,9 @@ def list_videos(
             "captured_at":       v.get("captured_at"),
             "uploaded_at":       v.get("uploaded_at"),
             "status":            v.get("status"),
-            "display_status":    _display_status(str(v.get("status", "")), apps),
+            "display_status":    _display_status(
+                anns, v.get("total_frames"), v.get("frames_processed_count"),
+            ),
             "species":           sorted({a.get("species") for a in apps if a.get("species")}),
             "appearance_count":  len(apps),
         }))
@@ -1160,9 +1348,10 @@ def delete_video(
     video_id:   str,
     tenant_id:  str = Depends(get_current_tenant),
 ):
-    """Remove vídeo: apaga S3 frames + ficheiro + aparições + registo DynamoDB."""
+    """Remove vídeo: apaga S3 frames + ficheiro + aparições + frame-annotations + registo DynamoDB."""
     vid_tbl = _videos_table()
     app_tbl = _appearances_table()
+    ann_tbl = _frame_annotations_table()
 
     vid_item = vid_tbl.get_item(
         Key={"tenant_id": tenant_id, "project_id#video_id": f"{project_id}#{video_id}"}
@@ -1198,6 +1387,26 @@ def delete_video(
     for a in apps:
         app_tbl.delete_item(
             Key={"tenant_id": tenant_id, "video_id#appearance_id": a["video_id#appearance_id"]}
+        )
+
+    # Apaga frame-annotations associadas (evita órfãs — BUG conhecido, corrigido aqui)
+    anns: list[dict] = []
+    kwargs: dict = {
+        "KeyConditionExpression": (
+            Key("tenant_id").eq(tenant_id)
+            & Key("video_id#frame_idx").begins_with(f"{video_id}#")
+        ),
+    }
+    while True:
+        resp = ann_tbl.query(**kwargs)
+        anns.extend(resp.get("Items", []))
+        lek = resp.get("LastEvaluatedKey")
+        if not lek:
+            break
+        kwargs["ExclusiveStartKey"] = lek
+    for a in anns:
+        ann_tbl.delete_item(
+            Key={"tenant_id": tenant_id, "video_id#frame_idx": a["video_id#frame_idx"]}
         )
 
     # Apaga registo do vídeo
