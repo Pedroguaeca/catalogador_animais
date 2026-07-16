@@ -109,6 +109,7 @@ export function ReviewPage({ videos, initialVideoId, projectId }: ReviewPageProp
 
   useEffect(() => {
     prevFullyAnnotatedRef.current = null;
+    setCelebrate(false);
   }, [state.videoId]);
 
   useEffect(() => {
@@ -116,12 +117,20 @@ export function ReviewPage({ videos, initialVideoId, projectId }: ReviewPageProp
     const prev = prevFullyAnnotatedRef.current;
     if (prev === false && isFull) {
       setCelebrate(true);
-      const t = setTimeout(() => setCelebrate(false), 500);
-      prevFullyAnnotatedRef.current = isFull;
-      return () => clearTimeout(t);
     }
     prevFullyAnnotatedRef.current = isFull;
   }, [state.annotated, totalFrames]);
+
+  // Timer de auto-hide isolado num effect próprio (dependência só de `celebrate`).
+  // Antes, o timeout vivia no effect acima e sua cleanup rodava sempre que
+  // totalFrames/annotated mudava (ex.: troca de vídeo logo após completar um) —
+  // cancelava o setCelebrate(false) pendente sem reagendar, deixando o overlay
+  // preso em `true` para sempre.
+  useEffect(() => {
+    if (!celebrate) return;
+    const t = setTimeout(() => setCelebrate(false), 500);
+    return () => clearTimeout(t);
+  }, [celebrate]);
 
   return (
     <div
