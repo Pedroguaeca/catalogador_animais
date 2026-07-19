@@ -17,6 +17,8 @@ export interface Frame {
   time: string;
   detection: Detection | null;
   status: "detection" | "review" | "empty"; // for filmstrip dot
+  novoEvento?: boolean;  // marca início de novo segmento/aparição neste frame
+  temFilhote?: boolean;  // presença de filhote(s) neste frame (dado de treino)
 }
 
 export interface Video {

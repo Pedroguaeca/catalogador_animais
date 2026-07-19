@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useEffect, useState } from "react";
-import { Search, X, Sparkles, Check, ChevronLeft, ChevronRight, SkipForward, Film, PencilLine } from "lucide-react";
+import { Search, X, Sparkles, Check, ChevronLeft, ChevronRight, SkipForward, Film, PencilLine, SplitSquareHorizontal } from "lucide-react";
 import type { Detection, Category } from "../lib/types";
 
 interface IdentificationPanelProps {
@@ -26,6 +26,10 @@ interface IdentificationPanelProps {
   onCloseNewCat: () => void;
   onNewCatName: (name: string) => void;
   onAddCategory: (name: string) => void;
+  novoEventoMarked: boolean;
+  onMarkNovoEvento: () => void;
+  temFilhote: boolean;
+  onToggleTemFilhote: (value: boolean) => void;
 }
 
 export function IdentificationPanel({
@@ -50,6 +54,10 @@ export function IdentificationPanel({
   onCloseNewCat,
   onNewCatName,
   onAddCategory,
+  novoEventoMarked,
+  onMarkNovoEvento,
+  temFilhote,
+  onToggleTemFilhote,
 }: IdentificationPanelProps) {
   const newCatInputRef = useRef<HTMLInputElement>(null);
 
@@ -236,6 +244,26 @@ export function IdentificationPanel({
           </div>
         )}
 
+        {/* Marcador de novo evento — ação rara, peso visual leve, não compete
+            com os 3 botões principais. Caso 4 do plano de aparições (16/07):
+            mesma espécie reaparecendo após um intervalo real de ausência. */}
+        {detection && (
+          <button
+            onClick={onMarkNovoEvento}
+            title="Usa isso só se o mesmo tipo de animal saiu de cena e voltou depois, no mesmo vídeo — não precisa pra vídeos com um evento contínuo."
+            className="self-start flex items-center gap-1 text-xs font-medium transition-colors"
+            style={{
+              color: novoEventoMarked ? "#2D8B5F" : "#9A9080",
+              ...font,
+            }}
+            onMouseEnter={(e) => { if (!novoEventoMarked) (e.currentTarget as HTMLElement).style.color = "#6B6357"; }}
+            onMouseLeave={(e) => { if (!novoEventoMarked) (e.currentTarget as HTMLElement).style.color = "#9A9080"; }}
+          >
+            <SplitSquareHorizontal size={12} />
+            {novoEventoMarked ? "Novo evento marcado aqui" : "Marcar como novo evento aqui"}
+          </button>
+        )}
+
         {/* Navegação de frame — sempre visível */}
         <div className="flex gap-2">
           <button
@@ -276,6 +304,24 @@ export function IdentificationPanel({
           </button>
         </div>
       </div>
+
+      {/* ── Filhote (metadado de treino, junto com a correção de espécie) ── */}
+      {detection && (
+        <div className="px-4 pb-2 shrink-0">
+          <label
+            className="flex items-center gap-2 text-sm cursor-pointer select-none"
+            style={{ color: "#6B6357", ...font }}
+          >
+            <input
+              type="checkbox"
+              checked={temFilhote}
+              onChange={(e) => onToggleTemFilhote(e.target.checked)}
+              style={{ accentColor: "#2D8B5F", width: 14, height: 14 }}
+            />
+            Tem filhote(s) neste frame
+          </label>
+        </div>
+      )}
 
       {/* ── Busca ──────────────────────────────────────── */}
       <div className="px-4 pb-2 shrink-0">

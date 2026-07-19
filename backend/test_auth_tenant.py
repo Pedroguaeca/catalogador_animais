@@ -18,8 +18,7 @@ from fastapi.testclient import TestClient
 
 from backend.api import app
 from backend.conftest import DEFAULT_TENANT, make_jwt
-from backend.test_endpoints_new import _condition_values
-from pipeline.ocr import VideoMetadata
+from backend.test_endpoints_new import _condition_values, _video_item, _frame_ann_item, _mock_groups_source
 
 TENANT_ID = DEFAULT_TENANT
 
@@ -64,9 +63,9 @@ def _app_tbl(items: list[dict]) -> MagicMock:
     return m
 
 
-def _s3_mock() -> MagicMock:
+def _s3_mock(presigned_url: str = "https://s3.amazonaws.com/bucket/key?X-Amz=sig") -> MagicMock:
     m = MagicMock()
-    m.put_object.return_value = {}
+    m.generate_presigned_url.return_value = presigned_url
     return m
 
 
@@ -77,47 +76,61 @@ def _sqs_mock() -> MagicMock:
     return m
 
 
+def _videos_tbl_mock(tenant_id: str = TENANT_ID) -> MagicMock:
+    m = MagicMock()
+    m.put_item.return_value    = {}
+    m.update_item.return_value = {}
+    m.get_item.return_value    = {"Item": {
+        "tenant_id":           tenant_id,
+        "project_id#video_id": "proj-001#vid-001",
+        "s3_key":              f"{tenant_id}/videos/vid-001.avi",
+        "status":              "pending_upload",
+    }}
+    return m
+
+
 # ══════════════════════════════════════════════════════════════════════════════
-# POST /projects/{project_id}/videos/upload — auth + tenant isolation
+# POST /projects/{project_id}/videos/upload-url — auth + tenant isolation
+# POST /projects/{project_id}/videos/{video_id}/confirm — auth + tenant isolation
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TestUploadVideoAuth(unittest.TestCase):
 
-    def test_no_auth_returns_401(self):
+    # ── upload-url ──────────────────────────────────────────────────────────
+
+    def test_upload_url_no_auth_returns_401(self):
         resp = no_auth_client.post(
-            "/projects/proj-001/videos/upload",
-            files={"file": ("vid.avi", b"data", "video/x-msvideo")},
+            "/projects/proj-001/videos/upload-url",
+            json={"filename": "vid.avi"},
         )
         self.assertEqual(resp.status_code, 401)
 
-    def test_bad_token_returns_401(self):
+    def test_upload_url_bad_token_returns_401(self):
         resp = client.post(
-            "/projects/proj-001/videos/upload",
-            files={"file": ("vid.avi", b"data", "video/x-msvideo")},
+            "/projects/proj-001/videos/upload-url",
+            json={"filename": "vid.avi"},
             headers={"Authorization": f"Bearer {make_jwt(bad_signature=True)}"},
         )
         self.assertEqual(resp.status_code, 401)
 
-    def test_expired_token_returns_401(self):
+    def test_upload_url_expired_token_returns_401(self):
         resp = client.post(
-            "/projects/proj-001/videos/upload",
-            files={"file": ("vid.avi", b"data", "video/x-msvideo")},
+            "/projects/proj-001/videos/upload-url",
+            json={"filename": "vid.avi"},
             headers={"Authorization": f"Bearer {make_jwt(expired=True)}"},
         )
         self.assertEqual(resp.status_code, 401)
 
-    def test_s3_key_uses_jwt_tenant_not_url_param(self):
-        """O prefixo do S3 key vem do JWT — não pode ser manipulado pela URL."""
-        s3  = _s3_mock()
-        sqs = _sqs_mock()
+    def test_upload_url_s3_key_uses_jwt_tenant(self):
+        """O s3_key retornado usa o tenant_id do JWT, não parâmetro da URL."""
         tenant_b_token = make_jwt(tenant_id="outro-tenant")
-        meta = VideoMetadata(camera_id="CAM01", captured_at=None, location_source="ocr", temperature_c=None)
-        with patch("backend.api._s3_client",             return_value=s3), \
-             patch("backend.api._sqs_client",            return_value=sqs), \
-             patch("backend.api.extract_video_metadata", return_value=meta):
+        tbl = _videos_tbl_mock("outro-tenant")
+        s3  = _s3_mock()
+        with patch("backend.api._s3_client",    return_value=s3), \
+             patch("backend.api._videos_table", return_value=tbl):
             resp = client.post(
-                "/projects/proj-001/videos/upload",
-                files={"file": ("vid.avi", b"data", "video/x-msvideo")},
+                "/projects/proj-001/videos/upload-url",
+                json={"filename": "vid.avi", "content_type": "video/x-msvideo"},
                 headers={"Authorization": f"Bearer {tenant_b_token}"},
             )
         self.assertEqual(resp.status_code, 200)
@@ -126,19 +139,45 @@ class TestUploadVideoAuth(unittest.TestCase):
                         f"S3 key deveria começar com 'outro-tenant/videos/', foi: {s3_key}")
         self.assertFalse(s3_key.startswith(TENANT_ID))
 
-    def test_sqs_message_uses_jwt_tenant(self):
+    def test_upload_url_dynamodb_record_uses_jwt_tenant(self):
+        """O registro gravado em siab-videos usa tenant_id do JWT."""
+        tenant_b_token = make_jwt(tenant_id="outro-tenant")
+        tbl = _videos_tbl_mock("outro-tenant")
+        s3  = _s3_mock()
+        with patch("backend.api._s3_client",    return_value=s3), \
+             patch("backend.api._videos_table", return_value=tbl):
+            client.post(
+                "/projects/proj-001/videos/upload-url",
+                json={"filename": "v.avi"},
+                headers={"Authorization": f"Bearer {tenant_b_token}"},
+            )
+        item = tbl.put_item.call_args[1]["Item"]
+        self.assertEqual(item["tenant_id"], "outro-tenant")
+        self.assertNotEqual(item["tenant_id"], TENANT_ID)
+
+    # ── confirm ─────────────────────────────────────────────────────────────
+
+    def test_confirm_no_auth_returns_401(self):
+        resp = no_auth_client.post("/projects/proj-001/videos/vid-001/confirm")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_confirm_bad_token_returns_401(self):
+        resp = client.post(
+            "/projects/proj-001/videos/vid-001/confirm",
+            headers={"Authorization": f"Bearer {make_jwt(bad_signature=True)}"},
+        )
+        self.assertEqual(resp.status_code, 401)
+
+    def test_confirm_sqs_message_uses_jwt_tenant(self):
         """tenant_id na mensagem SQS vem do JWT, não de parâmetro externo."""
         import json as _json
-        s3  = _s3_mock()
-        sqs = _sqs_mock()
         tenant_b_token = make_jwt(tenant_id="outro-tenant")
-        meta = VideoMetadata(camera_id=None, captured_at=None, location_source="manual", temperature_c=None)
-        with patch("backend.api._s3_client",             return_value=s3), \
-             patch("backend.api._sqs_client",            return_value=sqs), \
-             patch("backend.api.extract_video_metadata", return_value=meta):
+        tbl = _videos_tbl_mock("outro-tenant")
+        sqs = _sqs_mock()
+        with patch("backend.api._videos_table", return_value=tbl), \
+             patch("backend.api._sqs_client",   return_value=sqs):
             client.post(
-                "/projects/proj-001/videos/upload",
-                files={"file": ("v.avi", b"x", "video/x-msvideo")},
+                "/projects/proj-001/videos/vid-001/confirm",
                 headers={"Authorization": f"Bearer {tenant_b_token}"},
             )
         msg = _json.loads(sqs.send_message.call_args[1]["MessageBody"])
@@ -302,42 +341,46 @@ class TestExportAppearancesAuth(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 401)
 
-    def test_tenant_isolation_gsi_pk_uses_jwt_tenant(self):
-        """Export usa _appearances_from_project — GSI PK inclui tenant_id do JWT."""
-        tbl = _app_tbl([])
-        with patch("backend.api._appearances_table", return_value=tbl):
+    def test_tenant_isolation_query_uses_jwt_tenant(self):
+        """Export usa _confirmed_appearance_groups — query em siab-videos usa tenant_id do JWT."""
+        vid_tbl = MagicMock()
+        vid_tbl.query.return_value = {"Items": []}
+        with patch("backend.api._videos_table", return_value=vid_tbl):
             client.get("/projects/proj-001/appearances/export")
-        call_kw = tbl.query.call_args[1]
+        call_kw = vid_tbl.query.call_args[1]
         vals    = _condition_values(call_kw["KeyConditionExpression"])
-        self.assertIn(f"{TENANT_ID}#proj-001", vals)
+        self.assertIn(TENANT_ID, vals)
 
     def test_tenant_isolation_other_tenant_gets_separate_query(self):
-        """Tenant B exporta com PK diferente — dados de A não vazam."""
-        tbl            = _app_tbl([])
+        """Tenant B exporta com tenant_id diferente na query — dados de A não vazam."""
+        vid_tbl = MagicMock()
+        vid_tbl.query.return_value = {"Items": []}
         tenant_b_token = make_jwt(tenant_id="outro-tenant")
-        with patch("backend.api._appearances_table", return_value=tbl):
+        with patch("backend.api._videos_table", return_value=vid_tbl):
             resp = client.get(
                 "/projects/proj-001/appearances/export",
                 headers={"Authorization": f"Bearer {tenant_b_token}"},
             )
         self.assertEqual(resp.status_code, 200)
-        call_kw = tbl.query.call_args[1]
+        call_kw = vid_tbl.query.call_args[1]
         vals    = _condition_values(call_kw["KeyConditionExpression"])
-        self.assertIn("outro-tenant#proj-001", vals)
-        self.assertNotIn(f"{TENANT_ID}#proj-001", vals)
+        self.assertIn("outro-tenant", vals)
+        self.assertNotIn(TENANT_ID, vals)
 
     def test_export_only_confirmed_from_jwt_tenant(self):
-        """Apenas aparições confirmed do tenant do JWT aparecem no CSV."""
-        items = [
-            _make_appearance("a1", review_status="confirmed"),
-            _make_appearance("a2", review_status="pending"),
-            _make_appearance("a3", review_status="confirmed"),
+        """Apenas frames com annotated_species (confirmados) do tenant do JWT aparecem no CSV."""
+        videos = [_video_item("vid-001"), _video_item("vid-002"), _video_item("vid-003")]
+        frames = [
+            [_frame_ann_item("vid-001", species="dasyprocta leporina")],   # confirmado
+            [_frame_ann_item("vid-002", species=None)],                    # não revisado ainda
+            [_frame_ann_item("vid-003", species="puma concolor")],         # confirmado
         ]
-        tbl = _app_tbl(items)
-        with patch("backend.api._appearances_table", return_value=tbl):
+        vid_tbl, ann_tbl = _mock_groups_source(videos, frames)
+        with patch("backend.api._videos_table", return_value=vid_tbl), \
+             patch("backend.api._frame_annotations_table", return_value=ann_tbl):
             resp = client.get("/projects/proj-001/appearances/export")
         lines = [l for l in resp.text.strip().split("\n") if l]
-        self.assertEqual(len(lines), 3)  # header + 2 confirmed
+        self.assertEqual(len(lines), 3)  # header + 2 confirmadas
 
 
 if __name__ == "__main__":

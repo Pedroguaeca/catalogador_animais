@@ -48,6 +48,21 @@ function confirmAllVideoOnServer(projectId: string, videoId: string, idToken?: s
   }).catch(() => {});
 }
 
+function persistFrameFlag(
+  endpoint: "novo-evento" | "tem-filhote",
+  videoId: string,
+  framePath: string,
+  value: boolean,
+  idToken?: string,
+) {
+  if (!videoId || !framePath) return;
+  fetch(`${API_BASE}/frames/${endpoint}`, {
+    method: "PATCH",
+    headers: apiHeaders(idToken, { "Content-Type": "application/json" }),
+    body: JSON.stringify({ video_id: videoId, frame_path: framePath, value }),
+  }).catch(() => {});
+}
+
 export function ReviewPage({ videos, initialVideoId, projectId }: ReviewPageProps) {
   const { data: session } = useSession();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -62,11 +77,20 @@ export function ReviewPage({ videos, initialVideoId, projectId }: ReviewPageProp
   );
   const [zoom, setZoom] = useState(false);
 
+  // Overrides otimistas de novo_evento/tem_filhote — os frames vêm do fetch inicial
+  // (não são recarregados após cada PATCH), então a marcação local sobrepõe o valor
+  // vindo da API até a próxima troca de página. Chave = frame.path (único no projeto).
+  const [novoEventoOverrides, setNovoEventoOverrides] = useState<Record<string, boolean>>({});
+  const [temFilhoteOverrides, setTemFilhoteOverrides] = useState<Record<string, boolean>>({});
+
   const currentVideo = videos.find((v) => v.id === state.videoId) ?? videos[0];
   const videoIdx = videos.findIndex((v) => v.id === state.videoId);
   const frames = currentVideo?.frames ?? [];
   const frame = frames[state.frameIdx - 1] ?? null;
   const totalFrames = frames.length;
+
+  const novoEventoMarked = frame ? (novoEventoOverrides[frame.path] ?? frame.novoEvento ?? false) : false;
+  const temFilhote = frame ? (temFilhoteOverrides[frame.path] ?? frame.temFilhote ?? false) : false;
 
   // Atalhos de teclado
   const handleKey = useCallback(
@@ -218,6 +242,19 @@ export function ReviewPage({ videos, initialVideoId, projectId }: ReviewPageProp
             if (frame?.path) {
               persistFrameAnnotation(state.videoId, frame.path, name, "new_category", idToken);
             }
+          }}
+          novoEventoMarked={novoEventoMarked}
+          onMarkNovoEvento={() => {
+            if (!frame?.path) return;
+            const next = !novoEventoMarked;
+            setNovoEventoOverrides((prev) => ({ ...prev, [frame.path]: next }));
+            persistFrameFlag("novo-evento", state.videoId, frame.path, next, idToken);
+          }}
+          temFilhote={temFilhote}
+          onToggleTemFilhote={(value) => {
+            if (!frame?.path) return;
+            setTemFilhoteOverrides((prev) => ({ ...prev, [frame.path]: value }));
+            persistFrameFlag("tem-filhote", state.videoId, frame.path, value, idToken);
           }}
         />
       </div>

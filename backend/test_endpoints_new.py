@@ -391,7 +391,9 @@ class TestAnnotateFrame(unittest.TestCase):
         self.assertEqual(resp.json()["status"], "no_appearance")
 
     def test_annotation_is_persisted(self):
-        """put_item chamado com os campos corretos."""
+        """update_item chamado com os campos corretos (não put_item — ver docstring
+        de annotate_frame: precisa preservar ai_species/ai_score/bbox/novo_evento/
+        tem_filhote já existentes no item ao corrigir a espécie de novo)."""
         app_item = _make_app_item()
         ann_tbl, app_tbl = self._setup([app_item])
         with patch("backend.api._frame_annotations_table", return_value=ann_tbl), \
@@ -406,12 +408,16 @@ class TestAnnotateFrame(unittest.TestCase):
                     "annotation_source":  "ai_confirm",
                 },
             )
-        ann_tbl.put_item.assert_called_once()
-        item = ann_tbl.put_item.call_args[1]["Item"]
-        self.assertEqual(item["tenant_id"],         TENANT_ID)
-        self.assertEqual(item["annotated_species"],  "dasyprocta leporina")
-        self.assertEqual(item["annotation_source"],  "ai_confirm")
-        self.assertIn("annotated_at", item)
+        ann_tbl.update_item.assert_called_once()
+        call_kwargs = ann_tbl.update_item.call_args[1]
+        self.assertEqual(
+            call_kwargs["Key"],
+            {"tenant_id": TENANT_ID, "video_id#frame_idx": "vid-001#00020"},
+        )
+        vals = call_kwargs["ExpressionAttributeValues"]
+        self.assertEqual(vals[":sp"],  "dasyprocta leporina")
+        self.assertEqual(vals[":src"], "ai_confirm")
+        self.assertIn(":at", vals)
 
     def test_no_auth_returns_401(self):
         resp = no_auth_client.patch(
@@ -431,7 +437,7 @@ class TestAnnotateFrame(unittest.TestCase):
         self.assertEqual(resp.status_code, 401)
 
     def test_tenant_isolation_annotation_uses_jwt_tenant(self):
-        """frame_s3_key e tenant_id no item gravado usam o tenant do JWT."""
+        """Key e frame_s3_key do update_item usam o tenant do JWT."""
         app_item = _make_app_item()
         ann_tbl, app_tbl = self._setup([app_item])
         tenant_b_token = make_jwt(tenant_id="outro-tenant")
@@ -444,9 +450,9 @@ class TestAnnotateFrame(unittest.TestCase):
                       "annotated_species": "puma concolor", "annotation_source": "ai_confirm"},
                 headers={"Authorization": f"Bearer {tenant_b_token}"},
             )
-        item = ann_tbl.put_item.call_args[1]["Item"]
-        self.assertEqual(item["tenant_id"], "outro-tenant")
-        self.assertTrue(item["frame_s3_key"].startswith("outro-tenant/frames/"))
+        call_kwargs = ann_tbl.update_item.call_args[1]
+        self.assertEqual(call_kwargs["Key"]["tenant_id"], "outro-tenant")
+        self.assertTrue(call_kwargs["ExpressionAttributeValues"][":fsk"].startswith("outro-tenant/frames/"))
 
     def test_missing_fields_returns_422(self):
         resp = client.patch("/frames/annotation", json={"video_id": "only-this"})
@@ -542,45 +548,79 @@ class TestGetFrameAnnotations(unittest.TestCase):
 # GET /projects/{project_id}/stats
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _make_confirmed_appearance(
-    appearance_id: str = "app-001",
-    species: str = "dasyprocta leporina",
-    camera_id: str = "CAM01",
-    ts_start: str = "2025-01-11T08:00:00",
-    ts_end: str   = "2025-01-11T08:01:00",
-    taxonomic_path: str = "mammalia;rodentia;dasyproctidae",
+def _video_item(
+    video_id: str = "vid-001",
+    project_id: str = "proj-001",
+    camera_id: str | None = "CAM01",
+    captured_at: str | None = "2025-01-11T08:00:00",
 ) -> dict:
-    return {
-        "tenant_id":                f"{TENANT_ID}",
-        "tenant_id#review_status":  f"{TENANT_ID}#confirmed",
-        "project_id#appearance_id": f"proj-001#{appearance_id}",
-        "project_id":               "proj-001",
-        "appearance_id":            appearance_id,
-        "species":                  species,
-        "camera_id":                camera_id,
-        "ts_start":                 ts_start,
-        "ts_end":                   ts_end,
-        "taxonomic_path":           taxonomic_path,
-        "review_status":            "confirmed",
-        "support_frames":           3,
-        "individual_count":         1,
+    item: dict = {
+        "tenant_id":           TENANT_ID,
+        "project_id#video_id": f"{project_id}#{video_id}",
+        "project_id":          project_id,
+        "video_id":            video_id,
     }
+    if camera_id is not None:
+        item["camera_id"] = camera_id
+    if captured_at is not None:
+        item["captured_at"] = captured_at
+    return item
+
+
+def _frame_ann_item(
+    video_id: str = "vid-001",
+    frame_idx: int = 0,
+    species: str | None = "dasyprocta leporina",
+) -> dict:
+    item: dict = {
+        "tenant_id":          TENANT_ID,
+        "video_id#frame_idx": f"{video_id}#{frame_idx:05d}",
+        "video_id":           video_id,
+        "frame_idx":          frame_idx,
+        "ai_species":         species,
+        "ai_score":           Decimal("0.9"),
+        "frame_s3_key":       f"{TENANT_ID}/frames/{video_id}/frame_{frame_idx:05d}.jpg",
+    }
+    if species is not None:
+        item["annotated_species"] = species
+    return item
+
+
+def _mock_groups_source(videos: list[dict], frames_by_video: list[list[dict]]):
+    """videos e frames_by_video na mesma ordem (1 lista de frames por vídeo)."""
+    vid_tbl = MagicMock()
+    vid_tbl.query.return_value = {"Items": videos}
+    ann_tbl = MagicMock()
+    ann_tbl.query.side_effect = [{"Items": frames} for frames in frames_by_video]
+    return vid_tbl, ann_tbl
 
 
 class TestGetProjectStats(unittest.TestCase):
+    """Desde a migração (16/07), /stats é calculado em tempo real a partir de
+    siab-frame-annotations (ver _confirmed_appearance_groups em backend/api.py),
+    não mais de siab-appearances.review_status."""
 
-    def _tbl(self, items: list[dict]) -> MagicMock:
-        m = MagicMock()
-        m.query.return_value = {"Items": items}
-        return m
+    def _confirmed_videos(self, specs: list[dict]):
+        """Cada spec vira 1 vídeo com 1 frame confirmado (1 aparição).
+        Chaves aceitas: video_id, species, camera_id, ts_start."""
+        videos = [
+            _video_item(s.get("video_id", f"vid-{i:03d}"), camera_id=s.get("camera_id"),
+                        captured_at=s.get("ts_start", "2025-01-11T08:00:00"))
+            for i, s in enumerate(specs)
+        ]
+        frames = [
+            [_frame_ann_item(s.get("video_id", f"vid-{i:03d}"), species=s.get("species"))]
+            for i, s in enumerate(specs)
+        ]
+        return _mock_groups_source(videos, frames)
 
     def test_happy_path_returns_stats(self):
-        items = [
-            _make_confirmed_appearance("a1", species="dasyprocta leporina", camera_id="CAM01"),
-            _make_confirmed_appearance("a2", species="puma concolor",       camera_id="CAM02"),
-        ]
-        tbl = self._tbl(items)
-        with patch("backend.api._appearances_table", return_value=tbl):
+        vid_tbl, ann_tbl = self._confirmed_videos([
+            {"species": "dasyprocta leporina", "camera_id": "CAM01"},
+            {"species": "puma concolor",       "camera_id": "CAM02"},
+        ])
+        with patch("backend.api._videos_table", return_value=vid_tbl), \
+             patch("backend.api._frame_annotations_table", return_value=ann_tbl):
             resp = client.get("/projects/proj-001/stats")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -591,8 +631,9 @@ class TestGetProjectStats(unittest.TestCase):
         self.assertIsNotNone(body["period_end"])
 
     def test_empty_project_returns_zeros(self):
-        tbl = self._tbl([])
-        with patch("backend.api._appearances_table", return_value=tbl):
+        vid_tbl = MagicMock()
+        vid_tbl.query.return_value = {"Items": []}
+        with patch("backend.api._videos_table", return_value=vid_tbl):
             resp = client.get("/projects/proj-001/stats")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
@@ -602,14 +643,14 @@ class TestGetProjectStats(unittest.TestCase):
         self.assertIsNone(body["period_start"])
 
     def test_by_fauna_group_aggregation(self):
-        items = [
-            _make_confirmed_appearance("a1", taxonomic_path="mammalia;rodentia",
-                                       ts_start="2025-01-11T08:00:00"),
-            _make_confirmed_appearance("a2", taxonomic_path="aves;passeriformes",
-                                       ts_start="2025-01-11T10:00:00"),
-        ]
-        tbl = self._tbl(items)
-        with patch("backend.api._appearances_table", return_value=tbl):
+        """taxonomic_path não é persistido por frame — grupo vem do fallback por
+        gênero em _fauna_group_dash (_GENUS_GROUP)."""
+        vid_tbl, ann_tbl = self._confirmed_videos([
+            {"species": "dasyprocta leporina", "ts_start": "2025-01-11T08:00:00"},  # mastofauna
+            {"species": "crypturellus soui",   "ts_start": "2025-01-11T10:00:00"},  # avifauna
+        ])
+        with patch("backend.api._videos_table", return_value=vid_tbl), \
+             patch("backend.api._frame_annotations_table", return_value=ann_tbl):
             resp = client.get("/projects/proj-001/stats")
         by_month = resp.json()["by_fauna_group_and_month"]
         self.assertEqual(len(by_month), 1)  # mesmo mês (2025-01)
@@ -618,13 +659,13 @@ class TestGetProjectStats(unittest.TestCase):
         self.assertEqual(row["avifauna"],   1)
 
     def test_by_camera_aggregation(self):
-        items = [
-            _make_confirmed_appearance("a1", camera_id="CAM01"),
-            _make_confirmed_appearance("a2", camera_id="CAM01"),
-            _make_confirmed_appearance("a3", camera_id="CAM02"),
-        ]
-        tbl = self._tbl(items)
-        with patch("backend.api._appearances_table", return_value=tbl):
+        vid_tbl, ann_tbl = self._confirmed_videos([
+            {"species": "dasyprocta leporina", "camera_id": "CAM01"},
+            {"species": "puma concolor",       "camera_id": "CAM01"},
+            {"species": "cerdocyon thous",     "camera_id": "CAM02"},
+        ])
+        with patch("backend.api._videos_table", return_value=vid_tbl), \
+             patch("backend.api._frame_annotations_table", return_value=ann_tbl):
             resp = client.get("/projects/proj-001/stats")
         by_cam = resp.json()["by_camera"]
         cam_totals = {c["camera_id"]: c["total"] for c in by_cam}
@@ -642,27 +683,34 @@ class TestGetProjectStats(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 401)
 
-    def test_tenant_isolation_gsi_pk_uses_jwt_tenant(self):
-        """GSI by-review-status usa PK 'tenant_id#confirmed' do JWT."""
-        tbl = self._tbl([])
-        with patch("backend.api._appearances_table", return_value=tbl):
-            client.get("/projects/proj-001/stats")
-        call_kw = tbl.query.call_args[1]
+    def test_tenant_isolation_query_uses_jwt_tenant(self):
+        """Query em siab-videos usa tenant_id do JWT, não de parâmetro externo."""
+        vid_tbl = MagicMock()
+        vid_tbl.query.return_value = {"Items": []}
+        tenant_b_token = make_jwt(tenant_id="outro-tenant")
+        with patch("backend.api._videos_table", return_value=vid_tbl):
+            client.get("/projects/proj-001/stats", headers={"Authorization": f"Bearer {tenant_b_token}"})
+        call_kw = vid_tbl.query.call_args[1]
         vals = _condition_values(call_kw["KeyConditionExpression"])
-        self.assertIn(f"{TENANT_ID}#confirmed", vals)
+        self.assertIn("outro-tenant", vals)
+        self.assertNotIn(TENANT_ID, vals)
 
     def test_pagination_follows_last_evaluated_key(self):
-        page1 = [_make_confirmed_appearance(f"a{i}") for i in range(3)]
-        page2 = [_make_confirmed_appearance(f"a{i}") for i in range(3, 5)]
-        tbl   = MagicMock()
-        tbl.query.side_effect = [
+        """Paginação de siab-videos: 5 vídeos em 2 páginas, 1 frame confirmado cada."""
+        page1 = [_video_item(f"vid-{i:03d}") for i in range(3)]
+        page2 = [_video_item(f"vid-{i:03d}") for i in range(3, 5)]
+        vid_tbl = MagicMock()
+        vid_tbl.query.side_effect = [
             {"Items": page1, "LastEvaluatedKey": {"pk": "key1"}},
             {"Items": page2},
         ]
-        with patch("backend.api._appearances_table", return_value=tbl):
+        ann_tbl = MagicMock()
+        ann_tbl.query.side_effect = [{"Items": [_frame_ann_item(f"vid-{i:03d}")]} for i in range(5)]
+        with patch("backend.api._videos_table", return_value=vid_tbl), \
+             patch("backend.api._frame_annotations_table", return_value=ann_tbl):
             resp = client.get("/projects/proj-001/stats")
         self.assertEqual(resp.json()["total_confirmed"], 5)
-        self.assertEqual(tbl.query.call_count, 2)
+        self.assertEqual(vid_tbl.query.call_count, 2)
 
 
 if __name__ == "__main__":

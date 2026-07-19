@@ -25,6 +25,8 @@ interface ApiFrameItem {
   ai_score:          number | null;
   bbox:              [number, number, number, number] | null;
   annotated_species: string | null;
+  novo_evento?:      boolean | null;
+  tem_filhote?:      boolean | null;
 }
 
 // Frame-annotations só existem para frames onde o MegaDetector encontrou algo
@@ -49,6 +51,8 @@ function mapFrames(items: ApiFrameItem[]): Frame[] {
     // status alimenta o dot do Filmstrip: aqui usado como "confirmado" vs "pendente",
     // não como faixa de confiança da IA (que é o uso original no /  local).
     status: f.annotated_species ? "detection" : (f.ai_score ?? 0) > 0 ? "review" : "empty",
+    novoEvento: f.novo_evento ?? false,
+    temFilhote: f.tem_filhote ?? false,
   }));
 }
 

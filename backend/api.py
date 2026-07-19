@@ -7,6 +7,9 @@ Endpoints:
     GET    /projects/{project_id}/appearances             — lista aparições com filtros
     PATCH  /appearances/{appearance_id}/review            — revisão humana de aparição
     GET    /projects/{project_id}/appearances/export      — CSV exportação
+    PATCH  /frames/novo-evento                            — marca frame como início de novo evento/segmento
+    PATCH  /frames/tem-filhote                            — marca presença de filhote(s) num frame
+    PATCH  /appearances/individual-count                  — define quantidade de indivíduos de uma aparição confirmada
 
 Mudança de comportamento (upload):
     Antes: frontend enviava o vídeo no corpo da requisição → API fazia OCR síncrono e retornava
@@ -137,6 +140,20 @@ class AnnotationRequest(BaseModel):
     frame_path:        str
     annotated_species: str
     annotation_source: Literal["ai_confirm", "chip_select", "new_category"]
+
+
+class FrameFlagRequest(BaseModel):
+    """Corpo comum para marcadores booleanos de frame (novo_evento, tem_filhote)."""
+    video_id:   str
+    frame_path: str
+    value:      bool = True
+
+
+class IndividualCountRequest(BaseModel):
+    video_id:          str
+    species:           str
+    segment:           int
+    individual_count:  int
 
 
 class CameraCreate(BaseModel):
@@ -344,22 +361,6 @@ def _period(ts_start: str | None) -> str:
     return "Noturno"
 
 
-def _fauna_group(taxonomic_path: str | None) -> str:
-    """Retorna o grupo de fauna a partir do caminho taxonômico."""
-    if not taxonomic_path:
-        return ""
-    p = taxonomic_path.lower()
-    if "mammalia" in p:
-        return "Mamífero"
-    if "aves" in p:
-        return "Ave"
-    if "reptilia" in p:
-        return "Réptil"
-    if "amphibia" in p:
-        return "Anfíbio"
-    return "Fauna"
-
-
 # Curated genus → dashboard group. Covers common Brazilian/Pan-Tropical taxa.
 # Incomplete by design — unlisted genera fall to "outros". Expand as needed.
 _GENUS_GROUP: dict[str, str] = {
@@ -522,6 +523,92 @@ def _check_discrepancy(appearance_id: str, app_sk: str, tenant_id: str) -> None:
                 ":tr": f"{tenant_id}#pending",
             },
         )
+
+
+def _frame_segments_for_video(tenant_id: str, video_id: str) -> dict[tuple[str, int], list[dict]]:
+    """Agrupa as frame-annotations confirmadas de um vídeo por (annotated_species, segmento).
+
+    Segmento começa em 0 e incrementa a cada frame (na ordem de frame_idx) marcado
+    com novo_evento=true — independente da espécie. Sem nenhuma marca no vídeo,
+    todo mundo fica no segmento 0, e o agrupamento equivale a (video_id, species).
+    """
+    ann_tbl = _frame_annotations_table()
+    frames: list[dict] = []
+    kwargs: dict = {
+        "KeyConditionExpression": (
+            Key("tenant_id").eq(tenant_id)
+            & Key("video_id#frame_idx").begins_with(f"{video_id}#")
+        ),
+    }
+    while True:
+        resp = ann_tbl.query(**kwargs)
+        frames.extend(resp.get("Items", []))
+        lek = resp.get("LastEvaluatedKey")
+        if not lek:
+            break
+        kwargs["ExclusiveStartKey"] = lek
+    frames.sort(key=lambda f: int(f.get("frame_idx", 0)))
+
+    segment = 0
+    groups: dict[tuple[str, int], list[dict]] = {}
+    for f in frames:
+        if f.get("novo_evento"):
+            segment += 1
+        species = f.get("annotated_species")
+        if not species:
+            continue
+        groups.setdefault((species, segment), []).append(f)
+    return groups
+
+
+def _confirmed_appearance_groups(tenant_id: str, project_id: str) -> list[dict]:
+    """Calcula as aparições confirmadas do projeto em tempo real, a partir de
+    siab-frame-annotations — substitui a leitura antiga em siab-appearances
+    (review_status nunca é promovido a 'confirmed' lá desde a Fase 1/2 do /review).
+
+    Uma aparição = grupo de frames confirmados de um vídeo com a mesma
+    (annotated_species, segmento). Ver _frame_segments_for_video.
+    """
+    videos: list[dict] = []
+    kwargs: dict = {
+        "KeyConditionExpression": (
+            Key("tenant_id").eq(tenant_id)
+            & Key("project_id#video_id").begins_with(f"{project_id}#")
+        ),
+    }
+    while True:
+        resp = _videos_table().query(**kwargs)
+        videos.extend(resp.get("Items", []))
+        lek = resp.get("LastEvaluatedKey")
+        if not lek:
+            break
+        kwargs["ExclusiveStartKey"] = lek
+
+    groups: list[dict] = []
+    for v in videos:
+        video_id = v.get("video_id", "")
+        for (species, segment), members in _frame_segments_for_video(tenant_id, video_id).items():
+            scores = [float(m["ai_score"]) for m in members if m.get("ai_score") is not None]
+            best = max(members, key=lambda m: float(m.get("ai_score", 0)))
+            individual_counts = [
+                int(m["individual_count"]) for m in members if m.get("individual_count") is not None
+            ]
+            groups.append({
+                "appearance_key":   f"{video_id}#{species}#{segment}",
+                "video_id":         video_id,
+                "project_id":       project_id,
+                "species":          species,
+                "segment":          segment,
+                "camera_id":        v.get("camera_id"),
+                "ts_start":         v.get("captured_at"),
+                "ts_end":           v.get("captured_at"),
+                "taxonomic_path":   None,  # não persistido por frame — ver ADR/Notion 16/07
+                "species_score":    (sum(scores) / len(scores)) if scores else 0.0,
+                "individual_count": individual_counts[0] if individual_counts else 1,
+                "best_crop_s3_key": best.get("frame_s3_key", ""),
+                "support_frames":   len(members),
+            })
+    return groups
 
 
 # ── Endpoint 1 — Upload de vídeo ──────────────────────────────────────────────
@@ -878,23 +965,34 @@ def annotate_frame(
     body: AnnotationRequest,
     tenant_id: str = Depends(get_current_tenant),
 ):
-    """Persiste anotação de espécie por frame e verifica discrepâncias nas aparições."""
+    """Persiste anotação de espécie por frame e verifica discrepâncias nas aparições.
+
+    Usa update_item (não put_item) para não apagar campos gravados pelo pipeline
+    (ai_species, ai_score, bbox) nem marcadores de revisão (novo_evento,
+    tem_filhote, individual_count) já presentes no item ao corrigir a espécie
+    de novo.
+    """
     frame_idx    = _frame_idx_from_path(body.frame_path)
     frame_s3_key = f"{tenant_id}/frames/{body.frame_path}"
     annotated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     ann_tbl = _frame_annotations_table()
 
-    ann_tbl.put_item(Item={
-        "tenant_id":          tenant_id,
-        "video_id#frame_idx": f"{body.video_id}#{frame_idx:05d}",
-        "video_id":           body.video_id,
-        "frame_path":         body.frame_path,
-        "frame_s3_key":       frame_s3_key,
-        "frame_idx":          frame_idx,
-        "annotated_species":  body.annotated_species,
-        "annotation_source":  body.annotation_source,
-        "annotated_at":       annotated_at,
-    })
+    ann_tbl.update_item(
+        Key={"tenant_id": tenant_id, "video_id#frame_idx": f"{body.video_id}#{frame_idx:05d}"},
+        UpdateExpression=(
+            "SET video_id = :vid, frame_path = :fp, frame_s3_key = :fsk, frame_idx = :fi, "
+            "annotated_species = :sp, annotation_source = :src, annotated_at = :at"
+        ),
+        ExpressionAttributeValues={
+            ":vid": body.video_id,
+            ":fp":  body.frame_path,
+            ":fsk": frame_s3_key,
+            ":fi":  frame_idx,
+            ":sp":  body.annotated_species,
+            ":src": body.annotation_source,
+            ":at":  annotated_at,
+        },
+    )
 
     matched = _appearances_for_frame(body.video_id, frame_idx, tenant_id)
     for app_item in matched:
@@ -905,6 +1003,85 @@ def annotate_frame(
         )
 
     return {"status": "ok", "frame_idx": frame_idx, "appearances_updated": len(matched)}
+
+
+def _set_frame_flag(tenant_id: str, video_id: str, frame_path: str, field_name: str, value: bool) -> int:
+    """Grava (ou remove) um campo booleano num frame específico, sem afetar os demais campos."""
+    frame_idx = _frame_idx_from_path(frame_path)
+    ann_tbl = _frame_annotations_table()
+    key = {"tenant_id": tenant_id, "video_id#frame_idx": f"{video_id}#{frame_idx:05d}"}
+    if value:
+        ann_tbl.update_item(
+            Key=key,
+            UpdateExpression="SET #f = :v",
+            ExpressionAttributeNames={"#f": field_name},
+            ExpressionAttributeValues={":v": True},
+        )
+    else:
+        ann_tbl.update_item(
+            Key=key,
+            UpdateExpression="REMOVE #f",
+            ExpressionAttributeNames={"#f": field_name},
+        )
+    return frame_idx
+
+
+@app.patch("/frames/novo-evento")
+def mark_novo_evento(
+    body: FrameFlagRequest,
+    tenant_id: str = Depends(get_current_tenant),
+):
+    """Marca (ou desmarca) um frame como início de um novo evento/segmento.
+
+    Usado pelo Caso 4 do plano de aparições confirmadas (16/07): mesma espécie
+    reaparecendo após um intervalo real de ausência no mesmo vídeo — ação
+    humana explícita, nunca inferida automaticamente. Ver _frame_segments_for_video.
+    """
+    frame_idx = _set_frame_flag(tenant_id, body.video_id, body.frame_path, "novo_evento", body.value)
+    return {"status": "ok", "frame_idx": frame_idx, "novo_evento": body.value}
+
+
+@app.patch("/frames/tem-filhote")
+def mark_tem_filhote(
+    body: FrameFlagRequest,
+    tenant_id: str = Depends(get_current_tenant),
+):
+    """Marca (ou desmarca) presença de filhote(s) num frame — dado de treino para
+    fine-tuning futuro, não afeta agrupamento nem contagem de aparições."""
+    frame_idx = _set_frame_flag(tenant_id, body.video_id, body.frame_path, "tem_filhote", body.value)
+    return {"status": "ok", "frame_idx": frame_idx, "tem_filhote": body.value}
+
+
+@app.patch("/appearances/individual-count")
+def set_individual_count(
+    body: IndividualCountRequest,
+    tenant_id: str = Depends(get_current_tenant),
+):
+    """Define a quantidade de indivíduos (metadado manual, padrão 1) de uma
+    aparição confirmada — grava individual_count em todos os frames do grupo
+    (video_id, species, segment). Ver _frame_segments_for_video."""
+    if body.individual_count < 1:
+        raise HTTPException(status_code=422, detail="individual_count deve ser >= 1")
+
+    members = _frame_segments_for_video(tenant_id, body.video_id).get((body.species, body.segment))
+    if not members:
+        raise HTTPException(status_code=404, detail="Aparição não encontrada para esse vídeo/espécie/segmento.")
+
+    ann_tbl = _frame_annotations_table()
+    for m in members:
+        ann_tbl.update_item(
+            Key={"tenant_id": tenant_id, "video_id#frame_idx": m["video_id#frame_idx"]},
+            UpdateExpression="SET individual_count = :ic",
+            ExpressionAttributeValues={":ic": body.individual_count},
+        )
+    return {
+        "status":           "ok",
+        "video_id":         body.video_id,
+        "species":          body.species,
+        "segment":          body.segment,
+        "individual_count": body.individual_count,
+        "frames_updated":   len(members),
+    }
 
 
 # ── Endpoint 5 — Anotações de frame por aparição ─────────────────────────────
@@ -1056,28 +1233,15 @@ def get_project_stats(
     project_id: str,
     tenant_id: str = Depends(get_current_tenant),
 ):
-    """Agrega aparições confirmadas de um projeto para o dashboard."""
+    """Agrega aparições confirmadas de um projeto para o dashboard.
+
+    Calculado em tempo real a partir de siab-frame-annotations (ver
+    _confirmed_appearance_groups) — não lê mais siab-appearances.review_status,
+    que nunca é promovido a 'confirmed' desde o redesenho de /review por vídeo.
+    """
     from collections import defaultdict
 
-    table     = _appearances_table()
-    pk        = f"{tenant_id}#confirmed"
-    sk_prefix = f"{project_id}#"
-
-    items: list[dict] = []
-    kwargs: dict = {
-        "IndexName": "by-review-status",
-        "KeyConditionExpression": (
-            Key("tenant_id#review_status").eq(pk)
-            & Key("project_id#appearance_id").begins_with(sk_prefix)
-        ),
-    }
-    while True:
-        resp = table.query(**kwargs)
-        items.extend(resp.get("Items", []))
-        lek = resp.get("LastEvaluatedKey")
-        if not lek:
-            break
-        kwargs["ExclusiveStartKey"] = lek
+    items = _confirmed_appearance_groups(tenant_id, project_id)
 
     if not items:
         return {
@@ -1171,10 +1335,12 @@ def export_appearances(
     project_id: str,
     tenant_id: str = Depends(get_current_tenant),
 ):
-    """Exporta aparições confirmadas em CSV (formato do formulário manual)."""
-    table     = _appearances_table()
-    items     = _appearances_from_project(table, tenant_id, project_id)
-    confirmed = [a for a in items if a.get("review_status") == "confirmed"]
+    """Exporta aparições confirmadas em CSV (formato do formulário manual).
+
+    Calculado em tempo real a partir de siab-frame-annotations — ver
+    _confirmed_appearance_groups e o comentário equivalente em get_project_stats.
+    """
+    confirmed = _confirmed_appearance_groups(tenant_id, project_id)
     confirmed.sort(key=lambda a: a.get("ts_start") or "9999")
 
     fieldnames = [
@@ -1201,7 +1367,7 @@ def export_appearances(
             "periodo":         _period(ts),
             "nome_popular":    "",
             "nome_cientifico": app.get("species", ""),
-            "grupo_fauna":     _fauna_group(str(app.get("taxonomic_path", ""))),
+            "grupo_fauna":     _fauna_group_dash(app.get("taxonomic_path"), app.get("species")),
             "n_individuos":    int(app.get("individual_count", 1)),
             "qualidade":       round(float(app.get("species_score", 0)), 4),
             "obs":             "",
