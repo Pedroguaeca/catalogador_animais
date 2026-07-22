@@ -558,6 +558,22 @@ class TestExportAppearances(unittest.TestCase):
         self.assertIn("attachment", cd)
         self.assertIn("siab_proj-001", cd)
 
+    def test_qualidade_has_4_fixed_decimals(self):
+        """round() descartava zero à direita (0.583 em vez de 0.5830) — Excel/
+        Numbers em locale pt-BR confunde um valor de 3 dígitos decimais com
+        separador de milhar. Formatação fixa elimina a ambiguidade."""
+        video = _video_item("v1")
+        # ai_score = 0.583 → round(.,4) dava "0.583" (3 dígitos, zero à
+        # direita descartado); com :.4f deve sair "0.5830" (4 dígitos fixos).
+        frames = [_frame_ann_item("v1", frame_idx=0, species="mammalia", ai_score=0.583)]
+        vid_tbl, ann_tbl = _mock_groups_source([video], [frames])
+        with patch("backend.api._videos_table", return_value=vid_tbl), \
+             patch("backend.api._frame_annotations_table", return_value=ann_tbl):
+            resp = client.get("/projects/proj-001/appearances/export")
+        body = resp.text
+        self.assertIn("0.5830", body)
+        self.assertNotIn(",583\n", body)   # não pode sobrar só "583" sem o "0."
+
 
 class TestRoleAuth(unittest.TestCase):
     """Testa get_current_role() e require_role() sem adicionar endpoints permanentes."""
@@ -968,6 +984,55 @@ class TestProjectStats(unittest.TestCase):
              patch("backend.api._frame_annotations_table", return_value=ann_tbl):
             resp = client.get("/projects/proj-001/stats")
         self.assertEqual(resp.json()["total_confirmed"], 2)
+
+    def test_taxonomic_fallback_labels_classified_correctly(self):
+        """Sem taxonomic_path persistido por frame, rótulos de fallback do
+        SpeciesNet (mammalia/aves/rodentia/didelphidae) e gêneros reais fora da
+        curadoria original (metachirus) precisam ser tratados como caso
+        especial em _GENUS_GROUP — senão caem em 'outros' e somem do gráfico
+        de Grupo de Fauna mesmo contando para o total real."""
+        vid_tbl, ann_tbl = self._confirmed_videos([
+            {"video_id": "v1", "species": "mammalia",             "ts_start": "2025-01-11T08:00:00"},
+            {"video_id": "v2", "species": "aves",                 "ts_start": "2025-01-11T08:00:00"},
+            {"video_id": "v3", "species": "rodentia",             "ts_start": "2025-01-11T08:00:00"},
+            {"video_id": "v4", "species": "didelphidae",          "ts_start": "2025-01-11T08:00:00"},
+            {"video_id": "v5", "species": "metachirus nudicaudatus", "ts_start": "2025-01-11T08:00:00"},
+            {"video_id": "v6", "species": "blank",                "ts_start": "2025-01-11T08:00:00"},
+        ])
+        with patch("backend.api._videos_table", return_value=vid_tbl), \
+             patch("backend.api._frame_annotations_table", return_value=ann_tbl):
+            resp = client.get("/projects/proj-001/stats")
+        body = resp.json()
+        self.assertEqual(body["total_confirmed"], 6)  # todas contam no total, "blank" incluso
+        month = body["by_fauna_group_and_month"][0]
+        self.assertEqual(month["mastofauna"], 4)  # mammalia, rodentia, didelphidae, metachirus
+        self.assertEqual(month["avifauna"],   1)  # aves
+        self.assertEqual(month["herpetofauna"], 0)
+        # "blank" não é fauna — não deve inflar nenhum grupo
+        self.assertEqual(month["mastofauna"] + month["avifauna"] + month["herpetofauna"], 5)
+
+    def test_video_without_captured_at_goes_to_unknown_date_bucket(self):
+        """Vídeo sem captured_at (OCR falhou) não pode ser bucketado por mês —
+        antes isso descartava a aparição inteira do gráfico, divergindo do
+        total real. Agora entra em 'Data desconhecida' em vez de sumir."""
+        vid_tbl, ann_tbl = self._confirmed_videos([
+            {"video_id": "v1", "species": "dasyprocta leporina", "ts_start": "2025-01-11T08:00:00"},
+            {"video_id": "v2", "species": "puma concolor",       "ts_start": None},  # sem OCR
+        ])
+        with patch("backend.api._videos_table", return_value=vid_tbl), \
+             patch("backend.api._frame_annotations_table", return_value=ann_tbl):
+            resp = client.get("/projects/proj-001/stats")
+        body = resp.json()
+        self.assertEqual(body["total_confirmed"], 2)
+        months = {row["month"]: row for row in body["by_fauna_group_and_month"]}
+        self.assertIn("Data desconhecida", months)
+        self.assertEqual(months["Data desconhecida"]["mastofauna"], 1)
+        # soma de todas as barras do gráfico bate com o total real (nada descartado)
+        total_no_grafico = sum(
+            row["mastofauna"] + row["avifauna"] + row["herpetofauna"]
+            for row in body["by_fauna_group_and_month"]
+        )
+        self.assertEqual(total_no_grafico, body["total_confirmed"])
 
 
 if __name__ == "__main__":

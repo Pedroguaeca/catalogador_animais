@@ -374,7 +374,7 @@ _GENUS_GROUP: dict[str, str] = {
     "dasypus": "mastofauna", "cabassous": "mastofauna", "bradypus": "mastofauna",
     "choloepus": "mastofauna", "alouatta": "mastofauna", "cebus": "mastofauna",
     "sapajus": "mastofauna", "callicebus": "mastofauna", "callithrix": "mastofauna",
-    "speothos": "mastofauna",
+    "speothos": "mastofauna", "metachirus": "mastofauna",
     # Avifauna
     "psophia": "avifauna", "crax": "avifauna", "penelope": "avifauna",
     "crypturellus": "avifauna", "tinamus": "avifauna", "pteroglossus": "avifauna",
@@ -385,6 +385,12 @@ _GENUS_GROUP: dict[str, str] = {
     "eunectes": "herpetofauna", "boa": "herpetofauna", "corallus": "herpetofauna",
     "tupinambis": "herpetofauna", "iguana": "herpetofauna", "chelonoidis": "herpetofauna",
     "podocnemis": "herpetofauna", "rhinella": "herpetofauna", "leptodactylus": "herpetofauna",
+    # Rótulos de fallback taxonômico do SpeciesNet (classe/ordem/família, não
+    # espécie — usados quando o modelo tem baixa confiança). Sem taxonomic_path
+    # persistido por frame, esses rótulos IS o "gênero" na extração acima, então
+    # entram aqui como caso especial. "blank" fica de fora — não é fauna.
+    "mammalia": "mastofauna", "rodentia": "mastofauna", "didelphidae": "mastofauna",
+    "aves": "avifauna",
 }
 
 
@@ -1268,9 +1274,11 @@ def get_project_stats(
         lambda: {"mastofauna": 0, "avifauna": 0, "herpetofauna": 0}
     )
     for a in items:
-        month = (a.get("ts_start") or "")[:7]
-        if not month:
-            continue
+        # Vídeo sem captured_at (falha de OCR) não pode ser bucketado por mês —
+        # antes isso descartava a aparição inteira do gráfico (silenciosamente
+        # divergindo do total real). Agora entra num bucket explícito em vez
+        # de sumir.
+        month = (a.get("ts_start") or "")[:7] or "Data desconhecida"
         grp = _fauna_group_dash(a.get("taxonomic_path"), a.get("species"))
         if grp in ("mastofauna", "avifauna", "herpetofauna"):
             month_groups[month][grp] += 1
@@ -1369,7 +1377,11 @@ def export_appearances(
             "nome_cientifico": app.get("species", ""),
             "grupo_fauna":     _fauna_group_dash(app.get("taxonomic_path"), app.get("species")),
             "n_individuos":    int(app.get("individual_count", 1)),
-            "qualidade":       round(float(app.get("species_score", 0)), 4),
+            # 4 casas fixas (não round()) — round() descarta zeros à direita
+            # (ex: 0.583 em vez de 0.5830), e Excel/Numbers em locale pt-BR
+            # confunde um valor com exatamente 3 dígitos após o ponto com
+            # separador de milhar (0.583 vira 583 na leitura).
+            "qualidade":       f"{float(app.get('species_score', 0)):.4f}",
             "obs":             "",
         })
 

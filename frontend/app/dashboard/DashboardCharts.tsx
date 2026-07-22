@@ -35,6 +35,9 @@ export interface StatsData {
 const PT_MONTHS = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
 
 function formatMonth(ym: string): string {
+  // Bucket "Data desconhecida" (vídeo sem captured_at, ver /stats) não é
+  // "YYYY-MM" — passa direto, sem tentar formatar como mês.
+  if (!/^\d{4}-\d{2}$/.test(ym)) return ym;
   const [year, month] = ym.split("-");
   const m = parseInt(month, 10) - 1;
   return `${PT_MONTHS[m] ?? month}/${(year ?? "").slice(2)}`;
