@@ -67,6 +67,7 @@ export function loadVideos(): Video[] {
 
       return {
         idx: i + 1,
+        rawFrameIdx: i,            // fonte local não tem frame_idx bruto do pipeline — usa a posição
         path: framePath,          // relativo à pasta frames/
         video_uuid,               // primeiro segmento = UUID usado nas S3 keys
         timestamp: dateFmt && time ? `${dateFmt} · ${time}` : "",

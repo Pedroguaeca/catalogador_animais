@@ -9,7 +9,9 @@ Endpoints:
     GET    /projects/{project_id}/appearances/export      — CSV exportação
     PATCH  /frames/novo-evento                            — marca frame como início de novo evento/segmento
     PATCH  /frames/tem-filhote                            — marca presença de filhote(s) num frame
-    PATCH  /appearances/individual-count                  — define quantidade de indivíduos de uma aparição confirmada
+    PATCH  /frames/individual-count                       — define quantidade de indivíduos num frame específico
+    GET    /projects/{project_id}/videos/{video_id}/segments — resumo dos segmentos (espécie/faixa/indivíduos) do vídeo
+    PATCH  /appearances/individual-count                  — consolida indivíduos + filhote de uma aparição confirmada (checkout)
 
 Mudança de comportamento (upload):
     Antes: frontend enviava o vídeo no corpo da requisição → API fazia OCR síncrono e retornava
@@ -154,6 +156,14 @@ class IndividualCountRequest(BaseModel):
     species:           str
     segment:           int
     individual_count:  int
+    tem_filhote:       bool | None = None
+
+
+class FrameIntRequest(BaseModel):
+    """Corpo comum para valores inteiros por frame (individual_count)."""
+    video_id:   str
+    frame_path: str
+    value:      int
 
 
 class CameraCreate(BaseModel):
@@ -1058,13 +1068,34 @@ def mark_tem_filhote(
     return {"status": "ok", "frame_idx": frame_idx, "tem_filhote": body.value}
 
 
+@app.patch("/frames/individual-count")
+def set_frame_individual_count(
+    body: FrameIntRequest,
+    tenant_id: str = Depends(get_current_tenant),
+):
+    """Define individual_count num frame específico (stepper no painel de
+    revisão) — opcional, default 1, não afeta agrupamento nem contagem de
+    aparições. Distinto de PATCH /appearances/individual-count, que grava o
+    valor final consolidado em todos os frames de uma aparição (checkout)."""
+    if body.value < 1:
+        raise HTTPException(status_code=422, detail="value deve ser >= 1")
+    frame_idx = _frame_idx_from_path(body.frame_path)
+    _frame_annotations_table().update_item(
+        Key={"tenant_id": tenant_id, "video_id#frame_idx": f"{body.video_id}#{frame_idx:05d}"},
+        UpdateExpression="SET individual_count = :ic",
+        ExpressionAttributeValues={":ic": body.value},
+    )
+    return {"status": "ok", "frame_idx": frame_idx, "individual_count": body.value}
+
+
 @app.patch("/appearances/individual-count")
 def set_individual_count(
     body: IndividualCountRequest,
     tenant_id: str = Depends(get_current_tenant),
 ):
-    """Define a quantidade de indivíduos (metadado manual, padrão 1) de uma
-    aparição confirmada — grava individual_count em todos os frames do grupo
+    """Consolida os metadados finais de uma aparição confirmada (checkout do
+    vídeo, ou edição pontual): individual_count (obrigatório, padrão 1 no
+    modal) e tem_filhote (opcional) — grava em todos os frames do grupo
     (video_id, species, segment). Ver _frame_segments_for_video."""
     if body.individual_count < 1:
         raise HTTPException(status_code=422, detail="individual_count deve ser >= 1")
@@ -1073,12 +1104,18 @@ def set_individual_count(
     if not members:
         raise HTTPException(status_code=404, detail="Aparição não encontrada para esse vídeo/espécie/segmento.")
 
+    update_expr = "SET individual_count = :ic"
+    expr_vals: dict = {":ic": body.individual_count}
+    if body.tem_filhote is not None:
+        update_expr += ", tem_filhote = :tf"
+        expr_vals[":tf"] = body.tem_filhote
+
     ann_tbl = _frame_annotations_table()
     for m in members:
         ann_tbl.update_item(
             Key={"tenant_id": tenant_id, "video_id#frame_idx": m["video_id#frame_idx"]},
-            UpdateExpression="SET individual_count = :ic",
-            ExpressionAttributeValues={":ic": body.individual_count},
+            UpdateExpression=update_expr,
+            ExpressionAttributeValues=expr_vals,
         )
     return {
         "status":           "ok",
@@ -1086,6 +1123,7 @@ def set_individual_count(
         "species":          body.species,
         "segment":          body.segment,
         "individual_count": body.individual_count,
+        "tem_filhote":      body.tem_filhote,
         "frames_updated":   len(members),
     }
 
@@ -1167,6 +1205,36 @@ def list_video_frames(
         result.append(cleaned)
 
     return {"project_id": project_id, "video_id": video_id, "count": len(result), "frames": result}
+
+
+@app.get("/projects/{project_id}/videos/{video_id}/segments")
+def list_video_segments(
+    project_id: str,
+    video_id:   str,
+    tenant_id:  str = Depends(get_current_tenant),
+):
+    """Resumo dos segmentos confirmados do vídeo — espécie, faixa de frames e
+    quantidade de indivíduos (maior valor marcado em qualquer frame do
+    segmento, default 1). Base da faixa de resumo em /review e do modal de
+    checkout ao concluir o vídeo. Ver _frame_segments_for_video."""
+    groups = _frame_segments_for_video(tenant_id, video_id)
+
+    segments = []
+    for (species, segment), members in groups.items():
+        idxs = [int(m.get("frame_idx", 0)) for m in members]
+        counts = [int(m["individual_count"]) for m in members if m.get("individual_count") is not None]
+        segments.append({
+            "species":          species,
+            "segment":          segment,
+            "frame_start":      min(idxs),
+            "frame_end":        max(idxs),
+            "frame_count":      len(members),
+            "individual_count": max(counts) if counts else 1,
+            "tem_filhote":      any(m.get("tem_filhote") for m in members),
+        })
+    segments.sort(key=lambda s: s["frame_start"])
+
+    return {"project_id": project_id, "video_id": video_id, "count": len(segments), "segments": segments}
 
 
 # ── Endpoint 7 — Confirmar todos os frames de um vídeo ───────────────────────

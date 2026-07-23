@@ -6,6 +6,16 @@ function preAnnotatedIndices(frames: Frame[]): Set<number> {
   return new Set(frames.filter((f) => f.status === "detection").map((f) => f.idx));
 }
 
+// Espécie confirmada por posição de frame, semeada do fetch inicial — mesma
+// lógica de preAnnotatedIndices, mas guardando o nome pra exibir "Revisado: X".
+function preAnnotatedSpecies(frames: Frame[]): Record<number, string> {
+  const map: Record<number, string> = {};
+  for (const f of frames) {
+    if (f.status === "detection" && f.annotatedSpecies) map[f.idx] = f.annotatedSpecies;
+  }
+  return map;
+}
+
 export const DEFAULT_CATEGORIES: Category[] = [
   { id: "aramides",     name: "Aramides" },
   { id: "crypturellus", name: "Crypturellus" },
@@ -34,6 +44,7 @@ export const initialState = (videoId: string, frames: Frame[]): ReviewState => {
     videoId,
     categories: DEFAULT_CATEGORIES,
     annotatedFrames,
+    annotatedSpecies: preAnnotatedSpecies(frames),
   };
 };
 
@@ -52,10 +63,14 @@ export function reviewReducer(state: ReviewState, action: ReviewAction): ReviewS
       return { ...state, selected: null, confirmed: false };
 
     case "MARK_ANNOTATED": {
-      if (state.annotatedFrames.has(state.frameIdx)) return state;
-      const next = new Set(state.annotatedFrames);
-      next.add(state.frameIdx);
-      return { ...state, annotatedFrames: next, annotated: state.annotated + 1 };
+      const alreadyMarked = state.annotatedFrames.has(state.frameIdx);
+      const next = alreadyMarked ? state.annotatedFrames : new Set(state.annotatedFrames).add(state.frameIdx);
+      return {
+        ...state,
+        annotatedFrames: next,
+        annotated: alreadyMarked ? state.annotated : state.annotated + 1,
+        annotatedSpecies: { ...state.annotatedSpecies, [state.frameIdx]: action.payload.species },
+      };
     }
 
     case "SET_FRAME":
@@ -81,6 +96,7 @@ export function reviewReducer(state: ReviewState, action: ReviewAction): ReviewS
         query: "",
         annotatedFrames,
         annotated: annotatedFrames.size,
+        annotatedSpecies: preAnnotatedSpecies(action.payload.frames),
       };
     }
 
@@ -94,10 +110,16 @@ export function reviewReducer(state: ReviewState, action: ReviewAction): ReviewS
       return { ...state, newCatName: action.payload };
 
     case "CONFIRM_ALL_VIDEO": {
-      const totalFrames = action.payload;
+      const { frames } = action.payload;
       const next = new Set(state.annotatedFrames);
-      for (let i = 1; i <= totalFrames; i++) next.add(i);
-      return { ...state, annotatedFrames: next, annotated: next.size, confirmed: true };
+      const nextSpecies = { ...state.annotatedSpecies };
+      for (const f of frames) {
+        next.add(f.idx);
+        // "Confirmar vídeo" aplica o palpite da IA a cada frame — só sobrescreve
+        // o nome exibido se ainda não havia correção humana anterior pro frame.
+        if (f.detection && nextSpecies[f.idx] === undefined) nextSpecies[f.idx] = f.detection.genus_pt;
+      }
+      return { ...state, annotatedFrames: next, annotated: next.size, annotatedSpecies: nextSpecies, confirmed: true };
     }
 
     case "ADD_CATEGORY": {

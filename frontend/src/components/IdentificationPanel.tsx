@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useEffect, useState } from "react";
-import { Search, X, Sparkles, Check, ChevronLeft, ChevronRight, SkipForward, Film, PencilLine, SplitSquareHorizontal } from "lucide-react";
+import { Search, X, Sparkles, Check, CheckCircle2, ChevronLeft, ChevronRight, SkipForward, Film, PencilLine, SplitSquareHorizontal, Minus, Plus } from "lucide-react";
 import type { Detection, Category } from "../lib/types";
 
 interface IdentificationPanelProps {
@@ -30,6 +30,10 @@ interface IdentificationPanelProps {
   onMarkNovoEvento: () => void;
   temFilhote: boolean;
   onToggleTemFilhote: (value: boolean) => void;
+  isAnnotated: boolean;
+  annotatedSpeciesLabel: string | null;
+  individualCount: number;
+  onChangeIndividualCount: (n: number) => void;
 }
 
 export function IdentificationPanel({
@@ -58,8 +62,13 @@ export function IdentificationPanel({
   onMarkNovoEvento,
   temFilhote,
   onToggleTemFilhote,
+  isAnnotated,
+  annotatedSpeciesLabel,
+  individualCount,
+  onChangeIndividualCount,
 }: IdentificationPanelProps) {
   const newCatInputRef = useRef<HTMLInputElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (newCatOpen) newCatInputRef.current?.focus();
@@ -78,19 +87,22 @@ export function IdentificationPanel({
     setJustConfirmed(null);
   }, [frameIdx]);
 
+  // Busca é o único caminho de correção manual — sem grade fixa, resultados
+  // só aparecem quando o revisor digita algo.
   const filtered = query
     ? categories.filter((c) =>
         c.name.toLowerCase().includes(query.toLowerCase())
       )
-    : categories;
+    : [];
+
+  const startCorrection = () => {
+    onReject();
+    searchInputRef.current?.focus();
+  };
 
   const aiPt = detection?.genus_pt ?? null;
   const aiGenus = detection?.genus ?? null;
   const confidence = detection ? Math.round(detection.cls_conf * 100) : 0;
-
-  const aiCategoryId = categories.find(
-    (c) => c.name.toLowerCase() === aiPt?.toLowerCase()
-  )?.id ?? null;
 
   const font = { fontFamily: "IBM Plex Sans, sans-serif" };
   const labelStyle: React.CSSProperties = {
@@ -112,82 +124,109 @@ export function IdentificationPanel({
         overflow: "hidden",
       }}
     >
-      {/* ── Cartão IA ──────────────────────────────────── */}
+      {/* ── Cartão IA / Revisado ───────────────────────── */}
       <div className="px-4 pt-4 pb-3 shrink-0">
         <div
           className="p-3.5 flex flex-col gap-2.5"
           style={{
-            background: "#EEF5F0",
-            border: "1px solid #CDE3D6",
+            background: isAnnotated ? "#EAF6EE" : "#EEF5F0",
+            border: isAnnotated ? "1px solid #A9DABB" : "1px solid #CDE3D6",
             borderRadius: 13,
           }}
         >
-          {/* Label + conf */}
-          <div className="flex items-center justify-between">
-            <span className="flex items-center gap-1.5" style={labelStyle}>
-              <Sparkles size={11} style={{ color: "#2F6B4F" }} />
-              A IA sugere
-            </span>
-            {detection && (
-              <span
-                className="text-xs font-semibold px-2 py-0.5 rounded-full"
-                style={{ background: "#CDE3D6", color: "#1B5035" }}
-              >
-                conf. {confidence}%
-              </span>
-            )}
-          </div>
-
-          {detection ? (
-            <>
-              {/* Nome */}
-              <div>
-                <p
-                  style={{
-                    fontFamily: "Libre Franklin, sans-serif",
-                    fontSize: 21,
-                    fontWeight: 700,
-                    color: "#221F1A",
-                    lineHeight: 1.15,
-                    letterSpacing: "-0.01em",
-                  }}
+          {isAnnotated && annotatedSpeciesLabel ? (
+            /* Frame já revisado — mesmo painel, mesmo dado (fonte única com o
+               selo do carrossel e do frame grande), sem estado duplicado. */
+            <div className="flex items-center justify-between gap-2">
+              <span className="flex items-center gap-1.5 min-w-0" style={{ ...font }}>
+                <CheckCircle2 size={16} style={{ color: "#2D8B5F", flexShrink: 0 }} />
+                <span
+                  className="font-semibold truncate"
+                  style={{ fontSize: 15, color: "#1B5035" }}
+                  title={annotatedSpeciesLabel}
                 >
-                  {aiPt}
-                </p>
-                <p className="italic text-sm mt-0.5" style={{ color: "#6B6357", ...font }}>
-                  {aiGenus}
-                </p>
+                  Revisado: {annotatedSpeciesLabel}
+                </span>
+              </span>
+              <button
+                onClick={startCorrection}
+                className="text-xs font-semibold underline shrink-0"
+                style={{ color: "#2F6B4F", ...font }}
+              >
+                Corrigir
+              </button>
+            </div>
+          ) : (
+            <>
+              {/* Label + conf */}
+              <div className="flex items-center justify-between">
+                <span className="flex items-center gap-1.5" style={labelStyle}>
+                  <Sparkles size={11} style={{ color: "#2F6B4F" }} />
+                  A IA sugere
+                </span>
+                {detection && (
+                  <span
+                    className="text-xs font-semibold px-2 py-0.5 rounded-full"
+                    style={{ background: "#CDE3D6", color: "#1B5035" }}
+                  >
+                    conf. {confidence}%
+                  </span>
+                )}
               </div>
 
-              {/* Barra de confiança */}
-              <div className="rounded-full overflow-hidden" style={{ height: 5, background: "#DCEBE1" }}>
-                <div className="h-full rounded-full" style={{ width: `${confidence}%`, background: "#3E8E63" }} />
-              </div>
+              {detection ? (
+                <>
+                  {/* Nome */}
+                  <div>
+                    <p
+                      style={{
+                        fontFamily: "Libre Franklin, sans-serif",
+                        fontSize: 21,
+                        fontWeight: 700,
+                        color: "#221F1A",
+                        lineHeight: 1.15,
+                        letterSpacing: "-0.01em",
+                      }}
+                    >
+                      {aiPt}
+                    </p>
+                    <p className="italic text-sm mt-0.5" style={{ color: "#6B6357", ...font }}>
+                      {aiGenus}
+                    </p>
+                  </div>
+
+                  {/* Barra de confiança */}
+                  <div className="rounded-full overflow-hidden" style={{ height: 5, background: "#DCEBE1" }}>
+                    <div className="h-full rounded-full" style={{ width: `${confidence}%`, background: "#3E8E63" }} />
+                  </div>
+                </>
+              ) : (
+                <p className="text-sm" style={{ color: "#9A9080", ...font }}>
+                  Nenhuma detecção neste frame.
+                </p>
+              )}
             </>
-          ) : (
-            <p className="text-sm" style={{ color: "#9A9080", ...font }}>
-              Nenhuma detecção neste frame.
-            </p>
           )}
         </div>
       </div>
 
       {/* ── Faixa de ações + navegação de frame ────────── */}
       <div className="px-4 pb-3 flex flex-col gap-2 shrink-0">
-        {/* Confirmar frame / Confirmar vídeo / Corrigir — só com detecção */}
+        {/* Confirmar frame / Confirmar vídeo / Corrigir — só com detecção.
+            "Confirmar este frame" numa linha própria, largura total (é a
+            ação mais frequente). "Confirmar vídeo" e "Corrigir" lado a lado,
+            mesma largura — diferenciados só por cor/peso, não por tamanho. */}
         {detection && (
-          <div className="flex gap-2 items-center flex-wrap">
-            {/* Confirmar este frame — compacto: ação mais frequente, não pode
-                ocupar espaço desproporcional nem competir com o botão de vídeo */}
+          <div className="flex flex-col gap-2">
             <button
               onClick={() => { onConfirmAI(); setJustConfirmed("frame"); }}
               title="Marca só este frame como revisado — os outros continuam pendentes"
-              className="flex items-center justify-center gap-1.5 font-semibold"
+              className="w-full flex items-center justify-center gap-1.5 font-semibold"
               style={{
                 background: "#E8F5EE",
                 color: "#2D8B5F",
                 borderRadius: 10,
-                padding: "8px 14px",
+                padding: "10px 14px",
                 fontSize: 13,
                 transition: "background 0.15s",
                 ...font,
@@ -200,47 +239,44 @@ export function IdentificationPanel({
               <kbd className="text-xs rounded px-1 py-0.5" style={{ background: "rgba(45,139,95,0.12)", fontFamily: "IBM Plex Mono, monospace" }}>⏎</kbd>
             </button>
 
-            {/* Confirmar vídeo inteiro — maior: ação de mais peso, menos frequente,
-                precisa se destacar mais que "Confirmar este frame" */}
-            <button
-              onClick={() => { onConfirmVideo(); setJustConfirmed("video"); }}
-              title="Aplica esta espécie a todos os frames deste vídeo de uma vez"
-              className="flex items-center justify-center gap-2 font-semibold"
-              style={{
-                padding: "11px 18px", borderRadius: 11,
-                background: "#2D8B5F", color: "#FFFFFF",
-                fontSize: 14,
-                transition: "background 0.15s",
-                ...font,
-              }}
-              onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "#256E4B")}
-              onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "#2D8B5F")}
-            >
-              {justConfirmed === "video" ? <Check size={15} /> : <Film size={15} />}
-              {justConfirmed === "video" ? "Vídeo confirmado" : "Confirmar vídeo inteiro"}
-              <kbd className="text-xs rounded px-1" style={{ background: "rgba(255,255,255,0.2)", fontFamily: "IBM Plex Mono, monospace" }}>⇧⏎</kbd>
-            </button>
+            <div className="flex gap-2 items-stretch">
+              <button
+                onClick={() => { onConfirmVideo(); setJustConfirmed("video"); }}
+                title="Aplica esta espécie a todos os frames deste vídeo de uma vez"
+                className="flex-1 flex items-center justify-center gap-1.5 font-semibold"
+                style={{
+                  padding: "10px 12px", borderRadius: 10,
+                  background: "#2D8B5F", color: "#FFFFFF",
+                  fontSize: 13,
+                  transition: "background 0.15s",
+                  ...font,
+                }}
+                onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "#256E4B")}
+                onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "#2D8B5F")}
+              >
+                {justConfirmed === "video" ? <Check size={14} /> : <Film size={14} />}
+                {justConfirmed === "video" ? "Vídeo confirmado" : "Confirmar vídeo inteiro"}
+              </button>
 
-            {/* Corrigir — mesmo peso compacto de "Confirmar este frame": é
-                alternativa, não deve competir visualmente */}
-            <button
-              onClick={onReject}
-              title="Escolhe outra espécie para este frame"
-              className="flex items-center justify-center gap-1.5 font-semibold"
-              style={{
-                padding: "8px 14px", borderRadius: 10,
-                border: "1.5px solid #2D8B5F",
-                background: "#FFFFFF", color: "#2D8B5F",
-                fontSize: 13,
-                transition: "background 0.15s",
-                ...font,
-              }}
-              onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "#F2FAF6")}
-              onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "#FFFFFF")}
-            >
-              <PencilLine size={13} />
-              Não é isso? Corrigir
-            </button>
+              <button
+                onClick={startCorrection}
+                title="Escolhe outra espécie para este frame"
+                className="flex-1 flex items-center justify-center gap-1.5 font-semibold"
+                style={{
+                  padding: "10px 12px", borderRadius: 10,
+                  border: "1.5px solid #2D8B5F",
+                  background: "#FFFFFF", color: "#2D8B5F",
+                  fontSize: 13,
+                  transition: "background 0.15s",
+                  ...font,
+                }}
+                onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "#F2FAF6")}
+                onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "#FFFFFF")}
+              >
+                <PencilLine size={13} />
+                Não é isso? Corrigir
+              </button>
+            </div>
           </div>
         )}
 
@@ -305,9 +341,9 @@ export function IdentificationPanel({
         </div>
       </div>
 
-      {/* ── Filhote (metadado de treino, junto com a correção de espécie) ── */}
+      {/* ── Filhote + indivíduos (metadado de treino, junto com a correção) ── */}
       {detection && (
-        <div className="px-4 pb-2 shrink-0">
+        <div className="px-4 pb-2 shrink-0 flex items-center justify-between gap-3">
           <label
             className="flex items-center gap-2 text-sm cursor-pointer select-none"
             style={{ color: "#6B6357", ...font }}
@@ -320,6 +356,31 @@ export function IdentificationPanel({
             />
             Tem filhote(s) neste frame
           </label>
+
+          <div className="flex items-center gap-1 shrink-0" title="Quantidade de indivíduos neste frame (opcional)">
+            <button
+              onClick={() => onChangeIndividualCount(Math.max(1, individualCount - 1))}
+              disabled={individualCount <= 1}
+              className="flex items-center justify-center disabled:opacity-30 disabled:cursor-not-allowed"
+              style={{ width: 22, height: 22, borderRadius: 6, border: "1.5px solid #E7DECF", color: "#6B6357" }}
+            >
+              <Minus size={11} />
+            </button>
+            <span
+              className="text-center font-semibold"
+              style={{ width: 20, fontSize: 13, color: "#221F1A", ...font }}
+            >
+              {individualCount}
+            </span>
+            <button
+              onClick={() => onChangeIndividualCount(individualCount + 1)}
+              className="flex items-center justify-center"
+              style={{ width: 22, height: 22, borderRadius: 6, border: "1.5px solid #E7DECF", color: "#6B6357" }}
+            >
+              <Plus size={11} />
+            </button>
+            <span className="text-xs" style={{ color: "#9A9080", ...font }}>indivíduos</span>
+          </div>
         </div>
       )}
 
@@ -332,6 +393,7 @@ export function IdentificationPanel({
             style={{ color: "#9A9080" }}
           />
           <input
+            ref={searchInputRef}
             type="text"
             value={query}
             onChange={(e) => onQuery(e.target.value)}
@@ -349,14 +411,18 @@ export function IdentificationPanel({
         </div>
       </div>
 
-      {/* ── Label ──────────────────────────────────────── */}
-      <div className="px-4 pb-2 shrink-0">
-        <span style={labelStyle}>{query ? "Resultados" : "Confirmar como"}</span>
-      </div>
-
-      {/* ── Grade de espécies ─────────────────────────── */}
+      {/* ── Resultados da busca — grade fixa removida; sem digitar, nada aparece ── */}
       <div className="flex-1 overflow-y-auto px-4 pb-2 min-h-0">
-        {filtered.length === 0 ? (
+        {query && (
+          <div className="pb-2">
+            <span style={labelStyle}>Resultados</span>
+          </div>
+        )}
+        {!query ? (
+          <p className="text-sm text-center py-8" style={{ color: "#C3BAA8", ...font }}>
+            Digite pra buscar uma espécie.
+          </p>
+        ) : filtered.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-8 gap-2">
             <p className="text-sm text-center" style={{ color: "#9A9080", ...font }}>
               Nenhuma espécie encontrada.

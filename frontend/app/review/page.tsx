@@ -27,6 +27,7 @@ interface ApiFrameItem {
   annotated_species: string | null;
   novo_evento?:      boolean | null;
   tem_filhote?:      boolean | null;
+  individual_count?: number | null;
 }
 
 // Frame-annotations só existem para frames onde o MegaDetector encontrou algo
@@ -34,6 +35,7 @@ interface ApiFrameItem {
 function mapFrames(items: ApiFrameItem[]): Frame[] {
   return items.map((f, i): Frame => ({
     idx: i + 1,
+    rawFrameIdx: f.frame_idx,
     path: `${f.video_id}/frame_${String(f.frame_idx).padStart(5, "0")}.jpg`,
     imageUrl: f.thumbnail_url ?? undefined,
     video_uuid: f.video_id,
@@ -53,6 +55,8 @@ function mapFrames(items: ApiFrameItem[]): Frame[] {
     status: f.annotated_species ? "detection" : (f.ai_score ?? 0) > 0 ? "review" : "empty",
     novoEvento: f.novo_evento ?? false,
     temFilhote: f.tem_filhote ?? false,
+    annotatedSpecies: f.annotated_species ?? undefined,
+    individualCount: f.individual_count ?? 1,
   }));
 }
 

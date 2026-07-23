@@ -8,7 +8,8 @@ export interface Detection {
 }
 
 export interface Frame {
-  idx: number;          // frame number in video
+  idx: number;          // posição 1-based no array de frames deste vídeo
+  rawFrameIdx: number;  // frame_idx bruto do pipeline (usado pra casar com VideoSegment.frame_start/end)
   path: string;        // relative path from /api/image?p=... (fallback quando imageUrl ausente)
   imageUrl?: string;   // presigned S3 URL (dados AWS) — tem prioridade sobre path
   video_uuid: string;  // first segment of path = UUID used in S3 keys
@@ -19,6 +20,18 @@ export interface Frame {
   status: "detection" | "review" | "empty"; // for filmstrip dot
   novoEvento?: boolean;  // marca início de novo segmento/aparição neste frame
   temFilhote?: boolean;  // presença de filhote(s) neste frame (dado de treino)
+  annotatedSpecies?: string | null; // espécie confirmada (vinda da API no load inicial)
+  individualCount?: number;         // quantidade de indivíduos marcada neste frame (default 1)
+}
+
+export interface VideoSegment {
+  species:          string;
+  segment:          number;
+  frame_start:      number; // frame_idx bruto (não posição no array de frames)
+  frame_end:        number;
+  frame_count:      number;
+  individual_count: number; // maior valor marcado em qualquer frame do segmento
+  tem_filhote:      boolean;
 }
 
 export interface Video {
@@ -49,8 +62,8 @@ export type ReviewAction =
   | { type: "CLOSE_NEW_CAT" }
   | { type: "SET_NEW_CAT_NAME"; payload: string }
   | { type: "ADD_CATEGORY"; payload: string }
-  | { type: "MARK_ANNOTATED" }
-  | { type: "CONFIRM_ALL_VIDEO"; payload: number };
+  | { type: "MARK_ANNOTATED"; payload: { species: string } }
+  | { type: "CONFIRM_ALL_VIDEO"; payload: { frames: Frame[] } };
 
 export interface ReviewState {
   query: string;
@@ -63,4 +76,8 @@ export interface ReviewState {
   videoId: string;
   categories: Category[];
   annotatedFrames: Set<number>;
+  // Espécie confirmada por posição de frame — fonte única para o selo "Revisado:
+  // X" no painel, sincronizada com annotatedFrames (Filmstrip/FrameStage leem
+  // só o Set; este Record supre o nome exibido).
+  annotatedSpecies: Record<number, string>;
 }

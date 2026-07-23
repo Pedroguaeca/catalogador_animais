@@ -1,13 +1,15 @@
 "use client";
 
 import { useRef, useEffect, useCallback } from "react";
-import { Maximize2, ZoomIn } from "lucide-react";
+import { Maximize2, ZoomIn, Check } from "lucide-react";
 import type { Frame } from "../lib/types";
 
 interface FrameStageProps {
   frame: Frame | null;
   zoom: boolean;
   onToggleZoom: () => void;
+  // Mesma fonte usada no Filmstrip e no painel "A IA sugere" — um selo, um dado.
+  isAnnotated: boolean;
 }
 
 const glass =
@@ -19,7 +21,7 @@ function bboxColor(clsConf: number): string {
   return "#8E8E93";
 }
 
-export function FrameStage({ frame, zoom, onToggleZoom }: FrameStageProps) {
+export function FrameStage({ frame, zoom, onToggleZoom, isAnnotated }: FrameStageProps) {
   const imgRef       = useRef<HTMLImageElement>(null);
   const canvasRef    = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -155,13 +157,24 @@ export function FrameStage({ frame, zoom, onToggleZoom }: FrameStageProps) {
         </div>
       )}
 
-      {/* Timestamp — sup esq */}
+      {/* Selo de revisado + timestamp — cluster sup esq, lado a lado (sem sobrepor) */}
       {frame && (
-        <div
-          className={`${glass} absolute top-3 left-3 px-3 py-1.5 text-xs`}
-          style={{ fontFamily: "IBM Plex Mono, monospace", letterSpacing: "0.04em" }}
-        >
-          {frame.timestamp}
+        <div className="absolute top-3 left-3 flex items-center gap-1.5">
+          {isAnnotated && (
+            <div
+              className="flex items-center justify-center rounded-full shrink-0"
+              style={{ width: 30, height: 30, background: "#2D8B5F", boxShadow: "0 2px 8px rgba(0,0,0,0.3)" }}
+              title="Frame revisado"
+            >
+              <Check size={16} color="#fff" strokeWidth={3} />
+            </div>
+          )}
+          <div
+            className={`${glass} px-3 py-1.5 text-xs`}
+            style={{ fontFamily: "IBM Plex Mono, monospace", letterSpacing: "0.04em" }}
+          >
+            {frame.timestamp}
+          </div>
         </div>
       )}
 

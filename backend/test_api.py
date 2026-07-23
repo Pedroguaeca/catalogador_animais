@@ -1035,5 +1035,93 @@ class TestProjectStats(unittest.TestCase):
         self.assertEqual(total_no_grafico, body["total_confirmed"])
 
 
+class TestVideoSegments(unittest.TestCase):
+    """GET /projects/{id}/videos/{id}/segments — resumo consumido pela faixa de
+    segmentos e pelo modal de checkout em /review."""
+
+    def test_segments_summarize_species_range_and_individual_count(self):
+        ann_tbl = MagicMock()
+        ann_tbl.query.return_value = {"Items": [
+            _frame_ann_item("v1", frame_idx=0, species="didelphis virginiana", individual_count=2),
+            _frame_ann_item("v1", frame_idx=1, species="didelphis virginiana", individual_count=1),
+            _frame_ann_item("v1", frame_idx=2, species="didelphis virginiana"),
+            _frame_ann_item("v1", frame_idx=10, species="puma concolor"),
+        ]}
+        with patch("backend.api._frame_annotations_table", return_value=ann_tbl):
+            resp = client.get("/projects/proj-001/videos/v1/segments")
+        self.assertEqual(resp.status_code, 200)
+        segs = {s["species"]: s for s in resp.json()["segments"]}
+        self.assertEqual(segs["didelphis virginiana"]["frame_start"], 0)
+        self.assertEqual(segs["didelphis virginiana"]["frame_end"], 2)
+        self.assertEqual(segs["didelphis virginiana"]["frame_count"], 3)
+        self.assertEqual(segs["didelphis virginiana"]["individual_count"], 2)  # maior valor marcado
+        self.assertEqual(segs["puma concolor"]["individual_count"], 1)  # default
+
+    def test_segments_empty_video(self):
+        ann_tbl = MagicMock()
+        ann_tbl.query.return_value = {"Items": []}
+        with patch("backend.api._frame_annotations_table", return_value=ann_tbl):
+            resp = client.get("/projects/proj-001/videos/v1/segments")
+        self.assertEqual(resp.json()["segments"], [])
+
+
+class TestFrameIndividualCount(unittest.TestCase):
+    """PATCH /frames/individual-count — stepper por frame, distinto do
+    finalize em massa de PATCH /appearances/individual-count."""
+
+    def test_sets_value_on_single_frame(self):
+        ann_tbl = MagicMock()
+        with patch("backend.api._frame_annotations_table", return_value=ann_tbl):
+            resp = client.patch("/frames/individual-count", json={
+                "video_id": "v1", "frame_path": "v1/frame_00003.jpg", "value": 3,
+            })
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["individual_count"], 3)
+        call_kwargs = ann_tbl.update_item.call_args[1]
+        self.assertEqual(call_kwargs["Key"]["video_id#frame_idx"], f"v1#00003")
+        self.assertEqual(call_kwargs["ExpressionAttributeValues"][":ic"], 3)
+
+    def test_value_below_1_returns_422(self):
+        resp = client.patch("/frames/individual-count", json={
+            "video_id": "v1", "frame_path": "v1/frame_00003.jpg", "value": 0,
+        })
+        self.assertEqual(resp.status_code, 422)
+
+
+class TestFinalizeSegment(unittest.TestCase):
+    """PATCH /appearances/individual-count — checkout: grava individual_count
+    e, opcionalmente, tem_filhote em todos os frames do segmento."""
+
+    def test_finalize_writes_individual_count_and_tem_filhote_to_whole_group(self):
+        ann_tbl = MagicMock()
+        ann_tbl.query.return_value = {"Items": [
+            _frame_ann_item("v1", frame_idx=0, species="didelphis virginiana"),
+            _frame_ann_item("v1", frame_idx=1, species="didelphis virginiana"),
+        ]}
+        with patch("backend.api._frame_annotations_table", return_value=ann_tbl):
+            resp = client.patch("/appearances/individual-count", json={
+                "video_id": "v1", "species": "didelphis virginiana", "segment": 0,
+                "individual_count": 4, "tem_filhote": True,
+            })
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["frames_updated"], 2)
+        self.assertEqual(ann_tbl.update_item.call_count, 2)
+        for call in ann_tbl.update_item.call_args_list:
+            vals = call.kwargs["ExpressionAttributeValues"]
+            self.assertEqual(vals[":ic"], 4)
+            self.assertEqual(vals[":tf"], True)
+
+    def test_finalize_without_tem_filhote_only_writes_individual_count(self):
+        ann_tbl = MagicMock()
+        ann_tbl.query.return_value = {"Items": [_frame_ann_item("v1", frame_idx=0, species="puma concolor")]}
+        with patch("backend.api._frame_annotations_table", return_value=ann_tbl):
+            resp = client.patch("/appearances/individual-count", json={
+                "video_id": "v1", "species": "puma concolor", "segment": 0, "individual_count": 2,
+            })
+        self.assertEqual(resp.status_code, 200)
+        vals = ann_tbl.update_item.call_args.kwargs["ExpressionAttributeValues"]
+        self.assertNotIn(":tf", vals)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

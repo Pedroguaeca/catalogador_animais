@@ -1,20 +1,23 @@
 "use client";
 
+import { Check } from "lucide-react";
 import type { Frame } from "../lib/types";
 
 interface FilmstripProps {
   frames: Frame[];
   frameIdx: number; // 1-based
   onSelect: (idx: number) => void;
+  // Fonte única do "revisado" — mesmo Set usado no selo do frame grande e no
+  // painel "A IA sugere" (ReviewPage). Sem isso cada lugar podia divergir.
+  annotatedFrames: Set<number>;
 }
 
 const STATUS_COLOR: Record<string, string> = {
-  detection: "#5FD08A",
   review: "#E2A33C",
   empty: "#9A9080",
 };
 
-export function Filmstrip({ frames, frameIdx, onSelect }: FilmstripProps) {
+export function Filmstrip({ frames, frameIdx, onSelect, annotatedFrames }: FilmstripProps) {
   const current = frames[frameIdx - 1];
 
   return (
@@ -52,6 +55,7 @@ export function Filmstrip({ frames, frameIdx, onSelect }: FilmstripProps) {
       <div className="overflow-x-auto flex gap-2 p-3">
         {frames.map((f, i) => {
           const isActive = f.idx === frameIdx;
+          const isAnnotated = annotatedFrames.has(f.idx);
           return (
             <button
               key={f.idx}
@@ -87,16 +91,30 @@ export function Filmstrip({ frames, frameIdx, onSelect }: FilmstripProps) {
               >
                 {f.idx}
               </span>
-              {/* Dot de status — inf dir */}
-              <span
-                className="absolute bottom-1 right-1 rounded-full"
-                style={{
-                  width: 7,
-                  height: 7,
-                  background: STATUS_COLOR[f.status ?? "empty"],
-                  boxShadow: "0 0 0 1.5px rgba(0,0,0,0.4)",
-                }}
-              />
+              {/* Selo de revisado — inf dir. Peso visual consistente com o
+                  selo do frame grande (mesmo ✓, mesma cor), em vez do ponto
+                  verde discreto que só um olho treinado notava. */}
+              {isAnnotated ? (
+                <span
+                  className="absolute bottom-1 right-1 flex items-center justify-center rounded-full"
+                  style={{ width: 15, height: 15, background: "#2D8B5F", boxShadow: "0 0 0 1.5px rgba(0,0,0,0.35)" }}
+                >
+                  <Check size={10} color="#fff" strokeWidth={3} />
+                </span>
+              ) : (
+                <span
+                  className="absolute bottom-1 right-1 rounded-full"
+                  style={{
+                    width: 7,
+                    height: 7,
+                    // f.status "detection" sem estar em annotatedFrames não deveria
+                    // acontecer (annotatedFrames é semeado a partir dele) — "review"
+                    // como fallback seguro.
+                    background: STATUS_COLOR[f.status ?? "empty"] ?? STATUS_COLOR.review,
+                    boxShadow: "0 0 0 1.5px rgba(0,0,0,0.4)",
+                  }}
+                />
+              )}
             </button>
           );
         })}
