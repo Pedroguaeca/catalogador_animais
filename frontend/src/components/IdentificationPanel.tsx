@@ -66,7 +66,7 @@ function relativeTime(iso: string): string {
 }
 
 function Divider() {
-  return <div className="mx-4 shrink-0" style={{ height: 1, background: "#EFE8DB" }} />;
+  return <div className="mx-3 shrink-0" style={{ height: 1, background: "#EFE8DB" }} />;
 }
 
 function NavBtn({
@@ -88,9 +88,9 @@ function NavBtn({
       disabled={disabled}
       className="flex-1 flex items-center justify-center gap-1.5 font-medium disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
       style={{
-        padding: "10px 12px",
-        borderRadius: 10,
-        fontSize: 13.5,
+        padding: "8px 10px",
+        borderRadius: 9,
+        fontSize: 12.5,
         background: primary ? "#2F6B4F" : "#FAF6EE",
         color: primary ? "#fff" : "#221F1A",
         border: primary ? "none" : "1.5px solid #E7DECF",
@@ -187,6 +187,13 @@ export function IdentificationPanel({
   const aiGenus = detection?.genus ?? null;
   const confidence = detection ? Math.round(detection.cls_conf * 100) : 0;
 
+  // Controles de espécie/metadados (botões, novo evento, filhote/indivíduos)
+  // aparecem quando há detecção da IA OU quando o frame já foi confirmado
+  // manualmente — alguns frames antigos (bug do put_item, corrigido em 22/07)
+  // têm annotated_species sem ai_species/bbox; sem esse "|| isAnnotated" esses
+  // controles ficavam permanentemente inacessíveis nesses frames.
+  const showFrameControls = detection || isAnnotated;
+
   return (
     <div
       className="flex flex-col bg-white shrink-0"
@@ -194,16 +201,19 @@ export function IdentificationPanel({
         width: 410,
         borderRadius: 16,
         boxShadow: "0 1px 2px rgba(34,31,26,0.04), 0 6px 20px rgba(34,31,26,0.05)",
-        overflow: "hidden",
+        // overflow-y: auto é rede de segurança — se alguma combinação futura de
+        // blocos não couber na altura disponível, rola em vez de cortar/sobrepor.
+        overflowY: "auto",
+        overflowX: "hidden",
       }}
     >
       {/* ── 1. Cartão com identidade visual da IA / Revisado ──────────────
           Mesmo fundo/paleta nos dois estados (#E8F5EE fundo, #2D8B5F
           texto/ícones) — só o conteúdo muda. */}
-      <div className="px-4 pt-4 pb-4 shrink-0">
+      <div className="px-3 pt-3 pb-3 shrink-0">
         <div
-          className="p-4 flex flex-col gap-3"
-          style={{ background: "#E8F5EE", border: "1px solid #CDE3D6", borderRadius: 14 }}
+          className="p-3 flex flex-col gap-2"
+          style={{ background: "#E8F5EE", border: "1px solid #CDE3D6", borderRadius: 13 }}
         >
           <div className="flex items-center justify-between gap-2">
             {isAnnotated && annotatedSpeciesLabel ? (
@@ -244,7 +254,7 @@ export function IdentificationPanel({
                 <p
                   style={{
                     fontFamily: "Libre Franklin, sans-serif",
-                    fontSize: 22, fontWeight: 700, color: "#221F1A",
+                    fontSize: 20, fontWeight: 700, color: "#221F1A",
                     lineHeight: 1.15, letterSpacing: "-0.01em",
                   }}
                 >
@@ -267,7 +277,7 @@ export function IdentificationPanel({
                 <p
                   style={{
                     fontFamily: "Libre Franklin, sans-serif",
-                    fontSize: 22, fontWeight: 700, color: "#221F1A",
+                    fontSize: 20, fontWeight: 700, color: "#221F1A",
                     lineHeight: 1.15, letterSpacing: "-0.01em",
                   }}
                 >
@@ -294,39 +304,39 @@ export function IdentificationPanel({
 
       <Divider />
 
-      {/* ── 2. Botões de ação — só com detecção ──────────────────────── */}
-      {detection && (
-        <div className="px-4 py-4 flex flex-col gap-2.5 shrink-0">
+      {/* ── 2. Botões de ação — detecção OU já confirmado manualmente ──── */}
+      {showFrameControls && (
+        <div className="px-3 py-3 flex flex-col gap-2 shrink-0">
           <button
             onClick={() => { onConfirmAI(); setJustConfirmed("frame"); }}
             title="Marca só este frame como revisado — os outros continuam pendentes"
             className="w-full flex items-center justify-center gap-1.5 font-semibold"
             style={{
-              background: "#E8F5EE", color: "#2D8B5F", borderRadius: 11,
-              padding: "12px 16px", fontSize: 14.5, transition: "background 0.15s", ...font,
+              background: "#E8F5EE", color: "#2D8B5F", borderRadius: 10,
+              padding: "9px 12px", fontSize: 13, transition: "background 0.15s", ...font,
             }}
             onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "#D9EEE3")}
             onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "#E8F5EE")}
           >
-            {justConfirmed === "frame" && <Check size={14} />}
+            {justConfirmed === "frame" && <Check size={13} />}
             {justConfirmed === "frame" ? "Frame confirmado" : "Confirmar este frame"}
             <kbd className="text-xs rounded px-1 py-0.5" style={{ background: "rgba(45,139,95,0.12)", fontFamily: "IBM Plex Mono, monospace" }}>⏎</kbd>
           </button>
 
-          <div className="flex gap-2.5 items-stretch">
+          <div className="flex gap-2 items-stretch">
             <button
               onClick={() => { onConfirmVideo(); setJustConfirmed("video"); }}
               title="Aplica esta espécie a todos os frames deste vídeo de uma vez"
               className="flex-1 flex items-center justify-center gap-1.5 font-semibold"
               style={{
-                padding: "12px 14px", borderRadius: 11,
+                padding: "9px 11px", borderRadius: 10,
                 background: "#2D8B5F", color: "#FFFFFF",
-                fontSize: 14, transition: "background 0.15s", ...font,
+                fontSize: 13, transition: "background 0.15s", ...font,
               }}
               onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "#256E4B")}
               onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "#2D8B5F")}
             >
-              {justConfirmed === "video" ? <Check size={15} /> : <Film size={15} />}
+              {justConfirmed === "video" ? <Check size={14} /> : <Film size={14} />}
               {justConfirmed === "video" ? "Vídeo confirmado" : "Confirmar vídeo inteiro"}
             </button>
 
@@ -335,26 +345,26 @@ export function IdentificationPanel({
               title="Escolhe outra espécie para este frame"
               className="flex-1 flex items-center justify-center gap-1.5 font-semibold"
               style={{
-                padding: "12px 14px", borderRadius: 11,
+                padding: "9px 11px", borderRadius: 10,
                 border: "1.5px solid #2D8B5F",
                 background: "#FFFFFF", color: "#2D8B5F",
-                fontSize: 14, transition: "background 0.15s", ...font,
+                fontSize: 13, transition: "background 0.15s", ...font,
               }}
               onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = "#F2FAF6")}
               onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "#FFFFFF")}
             >
-              <PencilLine size={14} />
+              <PencilLine size={13} />
               Não é isso? Corrigir
             </button>
           </div>
         </div>
       )}
 
-      {detection && <Divider />}
+      {showFrameControls && <Divider />}
 
       {/* ── 3. Marcador de novo evento — ação rara, peso visual leve ──── */}
-      {detection && (
-        <div className="px-4 py-3 shrink-0">
+      {showFrameControls && (
+        <div className="px-3 py-2 shrink-0">
           <button
             onClick={onMarkNovoEvento}
             title="Usa isso só se o mesmo tipo de animal saiu de cena e voltou depois, no mesmo vídeo — não precisa pra vídeos com um evento contínuo."
@@ -369,30 +379,30 @@ export function IdentificationPanel({
         </div>
       )}
 
-      {detection && <Divider />}
+      {showFrameControls && <Divider />}
 
       {/* ── 4. Navegação de frame — sempre visível. "Próximo" com mais
           destaque (preenchido) — é o mais clicado. ─────────────────── */}
-      <div className="px-4 py-4 flex gap-2.5 shrink-0">
+      <div className="px-3 py-3 flex gap-2 shrink-0">
         <NavBtn onClick={onPrevFrame} disabled={frameIdx <= 1}>
-          <ChevronLeft size={14} />
+          <ChevronLeft size={13} />
           Anterior
         </NavBtn>
         <NavBtn onClick={onSkipFrame} disabled={frameIdx >= totalFrames} shortcut="S">
-          <SkipForward size={14} />
+          <SkipForward size={13} />
           Pular
         </NavBtn>
         <NavBtn onClick={onNextFrame} disabled={frameIdx >= totalFrames} primary>
           Próximo
-          <ChevronRight size={14} />
+          <ChevronRight size={13} />
         </NavBtn>
       </div>
 
       <Divider />
 
       {/* ── 5. Metadados lado a lado ───────────────────────────────────── */}
-      {detection && (
-        <div className="px-4 py-3.5 shrink-0 flex items-center justify-between gap-3">
+      {showFrameControls && (
+        <div className="px-3 py-2.5 shrink-0 flex items-center justify-between gap-3">
           <label
             className="flex items-center gap-2 text-sm cursor-pointer select-none"
             style={{ color: "#6B6357", ...font }}
@@ -401,7 +411,7 @@ export function IdentificationPanel({
               type="checkbox"
               checked={temFilhote}
               onChange={(e) => onToggleTemFilhote(e.target.checked)}
-              style={{ accentColor: "#2D8B5F", width: 15, height: 15 }}
+              style={{ accentColor: "#2D8B5F", width: 14, height: 14 }}
             />
             Tem filhote(s) neste frame
           </label>
@@ -411,19 +421,19 @@ export function IdentificationPanel({
               onClick={() => onChangeIndividualCount(Math.max(1, individualCount - 1))}
               disabled={individualCount <= 1}
               className="flex items-center justify-center disabled:opacity-30 disabled:cursor-not-allowed"
-              style={{ width: 24, height: 24, borderRadius: 7, border: "1.5px solid #E7DECF", color: "#6B6357" }}
+              style={{ width: 22, height: 22, borderRadius: 6, border: "1.5px solid #E7DECF", color: "#6B6357" }}
             >
-              <Minus size={12} />
+              <Minus size={11} />
             </button>
-            <span className="text-center font-semibold" style={{ width: 22, fontSize: 14, color: "#221F1A", ...font }}>
+            <span className="text-center font-semibold" style={{ width: 20, fontSize: 13, color: "#221F1A", ...font }}>
               {individualCount}
             </span>
             <button
               onClick={() => onChangeIndividualCount(individualCount + 1)}
               className="flex items-center justify-center"
-              style={{ width: 24, height: 24, borderRadius: 7, border: "1.5px solid #E7DECF", color: "#6B6357" }}
+              style={{ width: 22, height: 22, borderRadius: 6, border: "1.5px solid #E7DECF", color: "#6B6357" }}
             >
-              <Plus size={12} />
+              <Plus size={11} />
             </button>
             <span className="text-xs" style={{ color: "#9A9080", ...font }}>indivíduos</span>
           </div>
@@ -434,33 +444,33 @@ export function IdentificationPanel({
 
       {/* ── 6. Busca de espécie (única área flexível/rolável) ──────────── */}
       <div className="flex-1 flex flex-col min-h-0">
-        <div className="px-4 pt-3.5 pb-2 shrink-0">
+        <div className="px-3 pt-2.5 pb-2 shrink-0">
           <div className="relative">
-            <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: "#9A9080" }} />
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: "#9A9080" }} />
             <input
               ref={searchInputRef}
               type="text"
               value={query}
               onChange={(e) => onQuery(e.target.value)}
               placeholder="Buscar espécie…"
-              className="w-full pl-9 pr-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#3E8E63]/30"
-              style={{ background: "#FAF6EE", border: "1.5px solid #E7DECF", borderRadius: 10, color: "#221F1A", ...font, fontSize: 14 }}
+              className="w-full pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#3E8E63]/30"
+              style={{ background: "#FAF6EE", border: "1.5px solid #E7DECF", borderRadius: 10, color: "#221F1A", ...font, fontSize: 13.5 }}
             />
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-4 pb-2 min-h-0">
+        <div className="flex-1 overflow-y-auto px-3 pb-2 min-h-0">
           {query && (
             <div className="pb-2">
               <span style={labelStyle}>Resultados</span>
             </div>
           )}
           {!query ? (
-            <p className="text-sm text-center py-8" style={{ color: "#C3BAA8", ...font }}>
+            <p className="text-sm text-center py-6" style={{ color: "#C3BAA8", ...font }}>
               Digite pra buscar uma espécie.
             </p>
           ) : filtered.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-8 gap-2">
+            <div className="flex flex-col items-center justify-center py-6 gap-2">
               <p className="text-sm text-center" style={{ color: "#9A9080", ...font }}>
                 Nenhuma espécie encontrada.
               </p>
@@ -482,7 +492,7 @@ export function IdentificationPanel({
                     onClick={() => onSelect(cat.id)}
                     className="flex items-center justify-between gap-1 text-left transition-colors"
                     style={{
-                      padding: "11px 12px", borderRadius: 11,
+                      padding: "9px 11px", borderRadius: 10,
                       border: isSelected ? "1.5px solid #2F6B4F" : "1.5px solid #E7DECF",
                       background: isSelected ? "#2F6B4F" : "#fff",
                       color: isSelected ? "#fff" : "#221F1A",
@@ -500,7 +510,7 @@ export function IdentificationPanel({
           )}
         </div>
 
-        <div className="px-4 py-3 shrink-0 border-t" style={{ borderColor: "#EFE8DB" }}>
+        <div className="px-3 py-2 shrink-0 border-t" style={{ borderColor: "#EFE8DB" }}>
           {newCatOpen ? (
             <div className="flex items-center gap-2">
               <input
@@ -536,7 +546,7 @@ export function IdentificationPanel({
           ) : (
             <button
               onClick={onOpenNewCat}
-              className="w-full py-2 text-sm font-medium transition-colors rounded-lg"
+              className="w-full py-1.5 text-sm font-medium transition-colors rounded-lg"
               style={{ border: "1.5px dashed #C3BAA8", color: "#6B6357", background: "transparent", borderRadius: 10, ...font }}
               onMouseEnter={(e) => {
                 (e.currentTarget as HTMLElement).style.borderColor = "#9A9080";
@@ -557,7 +567,7 @@ export function IdentificationPanel({
 
       {/* ── 7. Navegação de vídeo — migrada da barra inferior, mesmo peso
           visual da navegação de frame. ────────────────────────────────── */}
-      <div className="px-4 py-4 flex gap-2.5 shrink-0">
+      <div className="px-3 py-3 flex gap-2 shrink-0">
         <NavBtn onClick={onPrevVideo} disabled={videoIdx <= 0}>
           ◄◄ Vídeo anterior
         </NavBtn>
