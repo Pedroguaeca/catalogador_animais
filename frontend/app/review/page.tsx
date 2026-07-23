@@ -28,6 +28,7 @@ interface ApiFrameItem {
   novo_evento?:      boolean | null;
   tem_filhote?:      boolean | null;
   individual_count?: number | null;
+  annotated_at?:      string | null;
 }
 
 // Frame-annotations só existem para frames onde o MegaDetector encontrou algo
@@ -56,6 +57,7 @@ function mapFrames(items: ApiFrameItem[]): Frame[] {
     novoEvento: f.novo_evento ?? false,
     temFilhote: f.tem_filhote ?? false,
     annotatedSpecies: f.annotated_species ?? undefined,
+    annotatedAt: f.annotated_at ?? undefined,
     individualCount: f.individual_count ?? 1,
   }));
 }

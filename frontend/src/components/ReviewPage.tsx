@@ -8,7 +8,6 @@ import { FrameStage } from "./FrameStage";
 import { Filmstrip } from "./Filmstrip";
 import { SegmentStrip } from "./SegmentStrip";
 import { IdentificationPanel } from "./IdentificationPanel";
-import { BottomBar } from "./BottomBar";
 import { CompletionCelebration } from "./CompletionCelebration";
 import { CheckoutModal, type CheckoutValues } from "./CheckoutModal";
 
@@ -179,6 +178,7 @@ export function ReviewPage({ videos, initialVideoId, projectId }: ReviewPageProp
   // re-renderizam juntos, sem estado duplicado.
   const isFrameAnnotated = state.annotatedFrames.has(state.frameIdx);
   const annotatedSpeciesLabel = state.annotatedSpecies[state.frameIdx] ?? null;
+  const annotatedAtLabel = state.annotatedAt[state.frameIdx] ?? null;
 
   const { segments, segmentKeyByFramePath } = useMemo(
     () => computeSegments(frames, state.annotatedSpecies, novoEventoOverrides, individualCountOverrides, temFilhoteOverrides),
@@ -224,6 +224,21 @@ export function ReviewPage({ videos, initialVideoId, projectId }: ReviewPageProp
     const target = frames.find((f) => f.rawFrameIdx === seg.frame_start);
     if (target) dispatch({ type: "SET_FRAME", payload: target.idx });
   }, [frames]);
+
+  // Navegação de vídeo — migrada da barra inferior pro painel lateral (Tarefa 2, 23/07).
+  const goToPrevVideo = useCallback(() => {
+    if (videoIdx > 0) {
+      const v = videos[videoIdx - 1];
+      dispatch({ type: "SET_VIDEO", payload: { videoId: v.id, frames: v.frames } });
+    }
+  }, [videos, videoIdx]);
+
+  const goToNextVideo = useCallback(() => {
+    if (videoIdx < videos.length - 1) {
+      const v = videos[videoIdx + 1];
+      dispatch({ type: "SET_VIDEO", payload: { videoId: v.id, frames: v.frames } });
+    }
+  }, [videos, videoIdx]);
 
   // Checkout: ao completar um vídeo INTEIRO (transição "aguardando revisão" →
   // "revisado"), abre o modal de consolidação em vez de celebrar direto — a
@@ -387,31 +402,19 @@ export function ReviewPage({ videos, initialVideoId, projectId }: ReviewPageProp
           }}
           isAnnotated={isFrameAnnotated}
           annotatedSpeciesLabel={annotatedSpeciesLabel}
+          annotatedAt={annotatedAtLabel}
           individualCount={individualCount}
           onChangeIndividualCount={(n) => {
             if (!frame?.path) return;
             setIndividualCountOverrides((prev) => ({ ...prev, [frame.path]: n }));
             persistFrameIndividualCount(state.videoId, frame.path, n, idToken);
           }}
+          videoIdx={videoIdx}
+          totalVideos={videos.length}
+          onPrevVideo={goToPrevVideo}
+          onNextVideo={goToNextVideo}
         />
       </div>
-
-      <BottomBar
-        videoIdx={videoIdx}
-        totalVideos={videos.length}
-        onPrevVideo={() => {
-          if (videoIdx > 0) {
-            const v = videos[videoIdx - 1];
-            dispatch({ type: "SET_VIDEO", payload: { videoId: v.id, frames: v.frames } });
-          }
-        }}
-        onNextVideo={() => {
-          if (videoIdx < videos.length - 1) {
-            const v = videos[videoIdx + 1];
-            dispatch({ type: "SET_VIDEO", payload: { videoId: v.id, frames: v.frames } });
-          }
-        }}
-      />
     </div>
   );
 }

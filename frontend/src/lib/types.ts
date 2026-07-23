@@ -21,6 +21,7 @@ export interface Frame {
   novoEvento?: boolean;  // marca início de novo segmento/aparição neste frame
   temFilhote?: boolean;  // presença de filhote(s) neste frame (dado de treino)
   annotatedSpecies?: string | null; // espécie confirmada (vinda da API no load inicial)
+  annotatedAt?: string | null;      // timestamp ISO da confirmação (para "Confirmado · há X")
   individualCount?: number;         // quantidade de indivíduos marcada neste frame (default 1)
 }
 
@@ -80,4 +81,6 @@ export interface ReviewState {
   // X" no painel, sincronizada com annotatedFrames (Filmstrip/FrameStage leem
   // só o Set; este Record supre o nome exibido).
   annotatedSpecies: Record<number, string>;
+  // Timestamp da confirmação por posição de frame — supre "Confirmado · há X".
+  annotatedAt: Record<number, string>;
 }

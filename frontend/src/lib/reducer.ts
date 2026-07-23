@@ -16,6 +16,15 @@ function preAnnotatedSpecies(frames: Frame[]): Record<number, string> {
   return map;
 }
 
+// Idem para annotated_at — supre "Confirmado · há X" no card.
+function preAnnotatedAt(frames: Frame[]): Record<number, string> {
+  const map: Record<number, string> = {};
+  for (const f of frames) {
+    if (f.status === "detection" && f.annotatedAt) map[f.idx] = f.annotatedAt;
+  }
+  return map;
+}
+
 export const DEFAULT_CATEGORIES: Category[] = [
   { id: "aramides",     name: "Aramides" },
   { id: "crypturellus", name: "Crypturellus" },
@@ -45,6 +54,7 @@ export const initialState = (videoId: string, frames: Frame[]): ReviewState => {
     categories: DEFAULT_CATEGORIES,
     annotatedFrames,
     annotatedSpecies: preAnnotatedSpecies(frames),
+    annotatedAt: preAnnotatedAt(frames),
   };
 };
 
@@ -70,6 +80,7 @@ export function reviewReducer(state: ReviewState, action: ReviewAction): ReviewS
         annotatedFrames: next,
         annotated: alreadyMarked ? state.annotated : state.annotated + 1,
         annotatedSpecies: { ...state.annotatedSpecies, [state.frameIdx]: action.payload.species },
+        annotatedAt: { ...state.annotatedAt, [state.frameIdx]: new Date().toISOString() },
       };
     }
 
@@ -97,6 +108,7 @@ export function reviewReducer(state: ReviewState, action: ReviewAction): ReviewS
         annotatedFrames,
         annotated: annotatedFrames.size,
         annotatedSpecies: preAnnotatedSpecies(action.payload.frames),
+        annotatedAt: preAnnotatedAt(action.payload.frames),
       };
     }
 
@@ -113,13 +125,18 @@ export function reviewReducer(state: ReviewState, action: ReviewAction): ReviewS
       const { frames } = action.payload;
       const next = new Set(state.annotatedFrames);
       const nextSpecies = { ...state.annotatedSpecies };
+      const nextAt = { ...state.annotatedAt };
+      const now = new Date().toISOString();
       for (const f of frames) {
         next.add(f.idx);
         // "Confirmar vídeo" aplica o palpite da IA a cada frame — só sobrescreve
         // o nome exibido se ainda não havia correção humana anterior pro frame.
-        if (f.detection && nextSpecies[f.idx] === undefined) nextSpecies[f.idx] = f.detection.genus_pt;
+        if (f.detection && nextSpecies[f.idx] === undefined) {
+          nextSpecies[f.idx] = f.detection.genus_pt;
+          nextAt[f.idx] = now;
+        }
       }
-      return { ...state, annotatedFrames: next, annotated: next.size, annotatedSpecies: nextSpecies, confirmed: true };
+      return { ...state, annotatedFrames: next, annotated: next.size, annotatedSpecies: nextSpecies, annotatedAt: nextAt, confirmed: true };
     }
 
     case "ADD_CATEGORY": {
