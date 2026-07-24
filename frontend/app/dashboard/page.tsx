@@ -6,7 +6,7 @@ import { useSession } from "next-auth/react";
 import { SiabNav } from "../../src/components/SiabNav";
 import { InfoTooltip } from "../../src/components/InfoTooltip";
 import { API_BASE } from "../../src/lib/api";
-import { Camera, AlignJustify, Leaf, CalendarDays, Loader2, PawPrint } from "lucide-react";
+import { Camera, AlignJustify, Leaf, Loader2, PawPrint } from "lucide-react";
 import type { StatsData } from "./DashboardCharts";
 
 const INDEPENDENT_RECORD_INFO =
@@ -229,7 +229,7 @@ export default function DashboardPage() {
               Dashboard
             </h1>
             <p className="text-sm mt-1" style={{ color: "#9A9080" }}>
-              {PROJECT_ID} · monitoramento de fauna
+              {PROJECT_ID} · monitoramento de fauna · {periodDisplay}
             </p>
           </div>
 
@@ -248,7 +248,7 @@ export default function DashboardPage() {
         </div>
 
         {/* Summary cards */}
-        <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(3, 1fr)" }}>
+        <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(4, 1fr)" }}>
           <SummaryCard
             icon={<AlignJustify size={14} />}
             label="Registros independentes"
@@ -279,12 +279,6 @@ export default function DashboardPage() {
             label="Câmeras ativas"
             value={totalCameras}
             sub="pontos de monitoramento"
-          />
-          <SummaryCard
-            icon={<CalendarDays size={14} />}
-            label="Período"
-            value={periodDisplay}
-            sub={stats?.period_start ? undefined : "aguardando dados"}
           />
         </div>
 
