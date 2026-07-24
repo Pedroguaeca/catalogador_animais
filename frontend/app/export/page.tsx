@@ -99,7 +99,7 @@ export default function ExportPage() {
               {[
                 "nome_arquivo", "camera", "lat", "long",
                 "data", "horario", "periodo",
-                "nome_popular", "nome_cientifico", "grupo_fauna",
+                "nome_popular", "nome_cientifico", "nivel_taxonomico", "grupo_fauna",
                 "n_individuos", "qualidade", "obs",
               ].map((col) => (
                 <span

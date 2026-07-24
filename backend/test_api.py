@@ -93,6 +93,7 @@ def _frame_ann_item(
     ai_score: float = 0.9,
     novo_evento: bool | None = None,
     individual_count: int | None = None,
+    taxonomic_level: str | None = None,
 ) -> dict:
     item: dict = {
         "tenant_id":          TENANT_ID,
@@ -109,6 +110,8 @@ def _frame_ann_item(
         item["novo_evento"] = novo_evento
     if individual_count is not None:
         item["individual_count"] = individual_count
+    if taxonomic_level is not None:
+        item["taxonomic_level"] = taxonomic_level
     return item
 
 
@@ -1121,6 +1124,127 @@ class TestFinalizeSegment(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         vals = ann_tbl.update_item.call_args.kwargs["ExpressionAttributeValues"]
         self.assertNotIn(":tf", vals)
+
+
+class TestTaxonomicLevel(unittest.TestCase):
+    """_taxonomic_level: usa o campo persistido pelo pipeline (fix de 23/07)
+    quando existe; cai no fallback curado só pra dado histórico."""
+
+    def test_uses_persisted_value_over_fallback(self):
+        from backend.api import _taxonomic_level
+        # "mammalia" cairia em "class" pelo fallback, mas o valor persistido
+        # (gravado pelo pipeline) sempre vence.
+        self.assertEqual(_taxonomic_level({"annotated_species": "mammalia", "taxonomic_level": "species"}), "species")
+
+    def test_fallback_known_class_family_order(self):
+        from backend.api import _taxonomic_level
+        self.assertEqual(_taxonomic_level({"annotated_species": "mammalia"}), "class")
+        self.assertEqual(_taxonomic_level({"annotated_species": "aves"}), "class")
+        self.assertEqual(_taxonomic_level({"annotated_species": "didelphidae"}), "family")
+        self.assertEqual(_taxonomic_level({"annotated_species": "rodentia"}), "order")
+
+    def test_fallback_two_word_binomial_is_species(self):
+        from backend.api import _taxonomic_level
+        self.assertEqual(_taxonomic_level({"annotated_species": "didelphis virginiana"}), "species")
+
+    def test_fallback_blank_and_paca_are_unidentified(self):
+        from backend.api import _taxonomic_level
+        self.assertEqual(_taxonomic_level({"annotated_species": "blank"}), "unidentified")
+        self.assertEqual(_taxonomic_level({"annotated_species": "Paca"}), "unidentified")
+
+    def test_fallback_unknown_single_word_is_unidentified(self):
+        """Espécie nunca vista antes do fix vira 'unidentified', não 'species' —
+        mais seguro do que contar errado."""
+        from backend.api import _taxonomic_level
+        self.assertEqual(_taxonomic_level({"annotated_species": "Crypturellus"}), "genus")
+        self.assertEqual(_taxonomic_level({"annotated_species": "totalmentedesconhecido"}), "unidentified")
+
+
+class TestStatsTaxonomicMetrics(unittest.TestCase):
+    """/stats: distinct_species só conta nivel_taxonomico=species; novos campos
+    unidentified_count, total_individuals; species_richness ganha taxonomic_level
+    e individual_count por espécie."""
+
+    def _confirmed_videos(self, specs: list[dict]):
+        videos = [
+            _video_item(s.get("video_id", f"vid-{i:03d}"), captured_at=s.get("ts_start", "2025-01-11T08:00:00"))
+            for i, s in enumerate(specs)
+        ]
+        frames = [
+            [_frame_ann_item(
+                s.get("video_id", f"vid-{i:03d}"), species=s.get("species"),
+                individual_count=s.get("individual_count"),
+            )]
+            for i, s in enumerate(specs)
+        ]
+        return _mock_groups_source(videos, frames)
+
+    def test_distinct_species_excludes_fallback_labels(self):
+        vid_tbl, ann_tbl = self._confirmed_videos([
+            {"species": "didelphis virginiana"},  # species
+            {"species": "mammalia"},               # class — não conta como espécie
+            {"species": "blank"},                  # unidentified — não conta
+        ])
+        with patch("backend.api._videos_table", return_value=vid_tbl), \
+             patch("backend.api._frame_annotations_table", return_value=ann_tbl):
+            resp = client.get("/projects/proj-001/stats")
+        body = resp.json()
+        self.assertEqual(body["total_confirmed"], 3)
+        self.assertEqual(body["distinct_species"], 1)
+        self.assertEqual(body["unidentified_count"], 2)
+
+    def test_total_individuals_sums_across_groups(self):
+        vid_tbl, ann_tbl = self._confirmed_videos([
+            {"species": "didelphis virginiana", "individual_count": 3},
+            {"species": "puma concolor", "individual_count": 2},
+        ])
+        with patch("backend.api._videos_table", return_value=vid_tbl), \
+             patch("backend.api._frame_annotations_table", return_value=ann_tbl):
+            resp = client.get("/projects/proj-001/stats")
+        self.assertEqual(resp.json()["total_individuals"], 5)
+
+    def test_species_richness_has_taxonomic_level_and_individual_count(self):
+        vid_tbl, ann_tbl = self._confirmed_videos([
+            {"species": "didelphis virginiana", "individual_count": 4},
+        ])
+        with patch("backend.api._videos_table", return_value=vid_tbl), \
+             patch("backend.api._frame_annotations_table", return_value=ann_tbl):
+            resp = client.get("/projects/proj-001/stats")
+        row = resp.json()["species_richness"][0]
+        self.assertEqual(row["taxonomic_level"], "species")
+        self.assertEqual(row["individual_count"], 4)
+
+    def test_empty_project_includes_new_fields_zeroed(self):
+        vid_tbl = MagicMock()
+        vid_tbl.query.return_value = {"Items": []}
+        with patch("backend.api._videos_table", return_value=vid_tbl):
+            resp = client.get("/projects/proj-001/stats")
+        body = resp.json()
+        self.assertEqual(body["unidentified_count"], 0)
+        self.assertEqual(body["total_individuals"], 0)
+
+
+class TestExportNivelTaxonomico(unittest.TestCase):
+    """CSV export ganha coluna nivel_taxonomico ao lado de nome_cientifico."""
+
+    def test_csv_has_nivel_taxonomico_column_with_correct_values(self):
+        videos = [_video_item("v1"), _video_item("v2")]
+        frames = [
+            [_frame_ann_item("v1", species="didelphis virginiana")],
+            [_frame_ann_item("v2", species="mammalia")],
+        ]
+        vid_tbl, ann_tbl = _mock_groups_source(videos, frames)
+        with patch("backend.api._videos_table", return_value=vid_tbl), \
+             patch("backend.api._frame_annotations_table", return_value=ann_tbl):
+            resp = client.get("/projects/proj-001/appearances/export")
+        lines = resp.text.strip().split("\n")
+        header = lines[0].split(",")
+        self.assertIn("nivel_taxonomico", header)
+        idx = header.index("nivel_taxonomico")
+        rows = [l.split(",") for l in lines[1:]]
+        values = {r[header.index("nome_cientifico")]: r[idx] for r in rows}
+        self.assertEqual(values["didelphis virginiana"], "species")
+        self.assertEqual(values["mammalia"], "class")
 
 
 if __name__ == "__main__":

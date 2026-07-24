@@ -421,6 +421,46 @@ def _fauna_group_dash(taxonomic_path: str | None, species: str | None = None) ->
     return _GENUS_GROUP.get(genus, "outros")
 
 
+# Fallback pra frames confirmados ANTES do pipeline passar a gravar
+# taxonomic_level (fix de 23/07) — curado a partir de scan real dos valores
+# distintos de annotated_species em siab-frame-annotations/siab-appearances
+# nessa data. Nunca reescreve os itens antigos; só cobre a leitura. Espécie
+# nova e desconhecida cai em "unidentified" por padrão (mais seguro que
+# contar errado como "species").
+#
+# "Paca" (nome popular digitado via "+ Nova categoria", não é gênero nem
+# espécie — o gênero real é Cuniculus) e "blank" (SpeciesNet confirmou que
+# NÃO é fauna) ficam como "unidentified" por decisão explícita — ver plano
+# "Alinhar taxonomia e nomenclatura de métricas" (23/07).
+_TAXONOMIC_LEVEL_FALLBACK: dict[str, str] = {
+    "mammalia": "class", "aves": "class",
+    "didelphidae": "family",
+    "rodentia": "order",
+    "crypturellus": "genus",
+    "blank": "unidentified",
+    "paca": "unidentified",
+}
+
+
+def _taxonomic_level(item: dict) -> str:
+    """nivel_taxonomico de um frame/grupo confirmado: usa o valor persistido
+    pelo pipeline se existir; senão cai no fallback curado acima (dado
+    histórico, anterior ao fix de 23/07); espécie nunca vista antes de
+    qualquer forma vira 'unidentified', não 'species'."""
+    persisted = item.get("taxonomic_level")
+    if persisted:
+        return persisted
+    species = (item.get("annotated_species") or item.get("species") or "").strip().lower()
+    if not species:
+        return "unidentified"
+    if species in _TAXONOMIC_LEVEL_FALLBACK:
+        return _TAXONOMIC_LEVEL_FALLBACK[species]
+    # "genus epithet" (duas palavras minúsculas) = identificação em espécie.
+    if len(species.split()) == 2:
+        return "species"
+    return "unidentified"
+
+
 def _ts_parts(ts: str | None) -> tuple[str, str]:
     """Separa ts_start ISO em (data DD/MM/YYYY, horário HH:MM:SS)."""
     if not ts or len(ts) < 19:
@@ -619,6 +659,7 @@ def _confirmed_appearance_groups(tenant_id: str, project_id: str) -> list[dict]:
                 "ts_start":         v.get("captured_at"),
                 "ts_end":           v.get("captured_at"),
                 "taxonomic_path":   None,  # não persistido por frame — ver ADR/Notion 16/07
+                "taxonomic_level":  _taxonomic_level(best),
                 "species_score":    (sum(scores) / len(scores)) if scores else 0.0,
                 "individual_count": individual_counts[0] if individual_counts else 1,
                 "best_crop_s3_key": best.get("frame_s3_key", ""),
@@ -1321,6 +1362,8 @@ def get_project_stats(
         return {
             "total_confirmed": 0,
             "distinct_species": 0,
+            "unidentified_count": 0,
+            "total_individuals": 0,
             "active_cameras": 0,
             "period_start": None,
             "period_end": None,
@@ -1329,7 +1372,14 @@ def get_project_stats(
             "species_richness": [],
         }
 
-    distinct_species = len({a.get("species") for a in items if a.get("species")})
+    # "Espécies distintas" só conta registros com identificação em nível de
+    # espécie de verdade — rótulos de fallback do SpeciesNet (mammalia, aves,
+    # rodentia, didelphidae, blank...) não são espécie e inflavam essa métrica.
+    # Ver _taxonomic_level e o plano "Alinhar taxonomia e nomenclatura" (23/07).
+    species_level_items = [a for a in items if a.get("taxonomic_level") == "species"]
+    distinct_species     = len({a.get("species") for a in species_level_items if a.get("species")})
+    unidentified_count   = len(items) - len(species_level_items)
+    total_individuals    = sum(int(a.get("individual_count", 1)) for a in items)
     active_cameras   = len({a.get("camera_id") for a in items if a.get("camera_id")})
 
     ts_starts = sorted(a["ts_start"] for a in items if a.get("ts_start"))
@@ -1383,17 +1433,22 @@ def get_project_stats(
             continue
         if sp not in sp_data:
             sp_data[sp] = {
-                "species": sp,
-                "group":   _fauna_group_dash(a.get("taxonomic_path"), sp),
-                "count":   0,
+                "species":          sp,
+                "group":            _fauna_group_dash(a.get("taxonomic_path"), sp),
+                "taxonomic_level":  a.get("taxonomic_level", "unidentified"),
+                "count":            0,
+                "individual_count": 0,
             }
         sp_data[sp]["count"] += 1
+        sp_data[sp]["individual_count"] += int(a.get("individual_count", 1))
 
     species_richness = sorted(sp_data.values(), key=lambda x: -x["count"])
 
     return {
         "total_confirmed":          len(items),
         "distinct_species":         distinct_species,
+        "unidentified_count":       unidentified_count,
+        "total_individuals":        total_individuals,
         "active_cameras":           active_cameras,
         "period_start":             period_start,
         "period_end":               period_end,
@@ -1422,7 +1477,7 @@ def export_appearances(
     fieldnames = [
         "nome_arquivo", "camera", "lat", "long",
         "data", "horario", "periodo",
-        "nome_popular", "nome_cientifico", "grupo_fauna",
+        "nome_popular", "nome_cientifico", "nivel_taxonomico", "grupo_fauna",
         "n_individuos", "qualidade", "obs",
     ]
 
@@ -1443,6 +1498,7 @@ def export_appearances(
             "periodo":         _period(ts),
             "nome_popular":    "",
             "nome_cientifico": app.get("species", ""),
+            "nivel_taxonomico": app.get("taxonomic_level", "unidentified"),
             "grupo_fauna":     _fauna_group_dash(app.get("taxonomic_path"), app.get("species")),
             "n_individuos":    int(app.get("individual_count", 1)),
             # 4 casas fixas (não round()) — round() descarta zeros à direita
