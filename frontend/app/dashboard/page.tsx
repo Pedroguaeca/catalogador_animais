@@ -4,9 +4,13 @@ import { useEffect, useState } from "react";
 import dynamic from "next/dynamic";
 import { useSession } from "next-auth/react";
 import { SiabNav } from "../../src/components/SiabNav";
+import { InfoTooltip } from "../../src/components/InfoTooltip";
 import { API_BASE } from "../../src/lib/api";
-import { Camera, AlignJustify, Leaf, CalendarDays, Loader2 } from "lucide-react";
+import { Camera, AlignJustify, Leaf, CalendarDays, Loader2, PawPrint } from "lucide-react";
 import type { StatsData } from "./DashboardCharts";
+
+const INDEPENDENT_RECORD_INFO =
+  "Um registro independente é contado por vídeo — a mesma espécie em vídeos diferentes (mesmo do mesmo dia ou câmera) conta como registros separados. Ainda não há uma janela de tempo entre vídeos consecutivos.";
 
 const PROJECT_ID = "projeto-junho-2026";
 
@@ -44,6 +48,15 @@ const GROUP_LABELS: Record<string, string> = {
   herpetofauna: "Herpetofauna",
   outros:       "Outros",
 };
+const TAXONOMIC_LEVEL_LABELS: Record<string, string> = {
+  species:      "Espécie",
+  genus:        "Gênero",
+  family:       "Família",
+  order:        "Ordem",
+  class:        "Classe",
+  unidentified: "Não identificado",
+};
+
 const GROUP_COLORS: Record<string, string> = {
   mastofauna:   "#2F6B4F",
   avifauna:     "#4A90D9",
@@ -74,18 +87,20 @@ function SectionTitle({ children }: { children: React.ReactNode }) {
 }
 
 function SummaryCard({
-  icon, label, value, sub,
+  icon, label, value, sub, info,
 }: {
   icon:  React.ReactNode;
   label: string;
   value: string | number;
   sub?:  string;
+  info?: string;
 }) {
   return (
     <div style={{ ...CARD_STYLE, display: "flex", flexDirection: "column", gap: 8 }}>
       <div className="flex items-center gap-2" style={{ color: "#9A9080" }}>
         {icon}
         <span className="text-xs font-medium" style={F}>{label}</span>
+        {info && <InfoTooltip text={info} />}
       </div>
       <p className="text-2xl font-semibold" style={{ color: "#221F1A", ...F, lineHeight: 1 }}>
         {value}
@@ -115,7 +130,7 @@ function SpeciesTable({ richness }: { richness: StatsData["species_richness"] })
       <table style={{ width: "100%", borderCollapse: "collapse", ...F, fontSize: 13 }}>
         <thead>
           <tr style={{ borderBottom: "1.5px solid #E7DECF" }}>
-            {["Grupo de Fauna", "Nome Científico", "Nº Registros"].map((h) => (
+            {["Grupo de Fauna", "Nome Científico", "Nível Taxonômico", "Nº Registros"].map((h) => (
               <th
                 key={h}
                 className="text-left pb-2 pr-4"
@@ -142,6 +157,9 @@ function SpeciesTable({ richness }: { richness: StatsData["species_richness"] })
                 <td className="py-2.5 pr-4" style={{ color: "#6B6357", fontStyle: "italic" }}>
                   {row.species}
                 </td>
+                <td className="py-2.5 pr-4" style={{ color: "#6B6357" }}>
+                  {TAXONOMIC_LEVEL_LABELS[row.taxonomic_level] ?? row.taxonomic_level}
+                </td>
                 <td className="py-2.5 pr-4 text-right font-semibold" style={{ color: "#221F1A" }}>
                   {row.count}
                 </td>
@@ -149,7 +167,7 @@ function SpeciesTable({ richness }: { richness: StatsData["species_richness"] })
             ))
           )}
           <tr style={{ borderTop: "2px solid #E7DECF", background: "#FAF6EE" }}>
-            <td colSpan={2} className="py-2.5 pr-4 font-semibold text-xs"
+            <td colSpan={3} className="py-2.5 pr-4 font-semibold text-xs"
               style={{ color: "#6B6357", textTransform: "uppercase", letterSpacing: "0.04em" }}>
               Total geral
             </td>
@@ -186,10 +204,12 @@ export default function DashboardPage() {
   }, [session]);
 
   // ── Derived values ───────────────────────────────────────────────────────────
-  const totalRecords   = stats?.total_confirmed   ?? 0;
-  const totalSpecies   = stats?.distinct_species  ?? 0;
-  const totalCameras   = stats?.active_cameras    ?? 0;
-  const activeGroups   = new Set(stats?.species_richness.map((r) => r.group) ?? []).size;
+  const totalRecords     = stats?.total_confirmed    ?? 0;
+  const totalSpecies     = stats?.distinct_species   ?? 0;
+  const totalIndividuals = stats?.total_individuals  ?? 0;
+  const unidentifiedCount = stats?.unidentified_count ?? 0;
+  const totalCameras     = stats?.active_cameras     ?? 0;
+  const activeGroups     = new Set(stats?.species_richness.map((r) => r.group) ?? []).size;
 
   const periodDisplay = stats
     ? stats.period_start
@@ -228,18 +248,31 @@ export default function DashboardPage() {
         </div>
 
         {/* Summary cards */}
-        <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(4, 1fr)" }}>
+        <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(3, 1fr)" }}>
           <SummaryCard
             icon={<AlignJustify size={14} />}
-            label="Total de registros"
+            label="Registros independentes"
             value={totalRecords.toLocaleString("pt-BR")}
-            sub="aparições confirmadas"
+            sub="confirmados"
+            info={INDEPENDENT_RECORD_INFO}
           />
           <SummaryCard
             icon={<Leaf size={14} />}
             label="Espécies distintas"
             value={totalSpecies}
-            sub={activeGroups > 0 ? `${activeGroups} grupo${activeGroups !== 1 ? "s" : ""} de fauna` : "sem dados"}
+            sub={
+              unidentifiedCount > 0
+                ? `${unidentifiedCount} não identificado${unidentifiedCount !== 1 ? "s" : ""}`
+                : activeGroups > 0 ? `${activeGroups} grupo${activeGroups !== 1 ? "s" : ""} de fauna` : "sem dados"
+            }
+            info="Conta só registros identificados em nível de espécie. Rótulos de fallback do modelo (classe, ordem, família, gênero) e frames sem fauna entram em 'não identificado', mostrado à parte."
+          />
+          <SummaryCard
+            icon={<PawPrint size={14} />}
+            label="Indivíduos"
+            value={totalIndividuals.toLocaleString("pt-BR")}
+            sub="somados por registro independente"
+            info="Quantidade de indivíduos marcada manualmente por registro (padrão 1), somada entre todos os registros confirmados — inclui os não identificados."
           />
           <SummaryCard
             icon={<Camera size={14} />}

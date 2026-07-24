@@ -6,7 +6,9 @@
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer, Cell,
+  PieChart, Pie,
 } from "recharts";
+import { InfoTooltip } from "../../src/components/InfoTooltip";
 
 export interface FaunaMonthRow {
   month:        string;
@@ -21,15 +23,25 @@ export interface CameraRow {
   top_species: string[];
 }
 
+export interface SpeciesRichnessRow {
+  species:           string;
+  group:             string;
+  taxonomic_level:   string;
+  count:             number;
+  individual_count:  number;
+}
+
 export interface StatsData {
   total_confirmed:          number;
   distinct_species:         number;
+  unidentified_count:       number;
+  total_individuals:        number;
   active_cameras:           number;
   period_start:             string | null;
   period_end:               string | null;
   by_fauna_group_and_month: FaunaMonthRow[];
   by_camera:                CameraRow[];
-  species_richness:         { species: string; group: string; count: number }[];
+  species_richness:         SpeciesRichnessRow[];
 }
 
 const PT_MONTHS = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"];
@@ -236,11 +248,87 @@ function CameraBarChart({ data }: { data: CameraRow[] }) {
   );
 }
 
+// Verde-musgo/terracota/mel-âmbar em rotação pras fatias de espécie; "Não
+// identificado" sempre no marrom-suave/cinza da paleta (não entra na rotação).
+const SPECIES_PALETTE = ["#2F6B4F", "#C25E3E", "#E2A33C"];
+const UNIDENTIFIED_COLOR = "#9A9080";
+const UNIDENTIFIED_LABEL = "Não identificado";
+
+function SpeciesPieChart({ richness }: { richness: SpeciesRichnessRow[] }) {
+  const speciesRows      = richness.filter((r) => r.taxonomic_level === "species");
+  const unidentifiedRows = richness.filter((r) => r.taxonomic_level !== "species");
+  const unidentifiedTotal = unidentifiedRows.reduce((s, r) => s + r.individual_count, 0);
+  // "blank" (SpeciesNet confirmou que não é fauna) é um subconjunto de
+  // "não identificado" — mostrado à parte pra não confundir com espécie
+  // genuína ainda não identificada.
+  const blankTotal = richness.find((r) => r.species === "blank")?.individual_count ?? 0;
+
+  const pieData = [
+    ...speciesRows.map((r) => ({ name: r.species, value: r.individual_count })),
+    ...(unidentifiedTotal > 0 ? [{ name: UNIDENTIFIED_LABEL, value: unidentifiedTotal }] : []),
+  ];
+  const total = pieData.reduce((s, d) => s + d.value, 0);
+
+  const colorFor = (name: string, i: number) =>
+    name === UNIDENTIFIED_LABEL ? UNIDENTIFIED_COLOR : SPECIES_PALETTE[i % SPECIES_PALETTE.length];
+
+  return (
+    <div style={CARD_STYLE}>
+      <div className="flex items-center gap-1.5 mb-4">
+        <SectionTitle>Indivíduos por Espécie</SectionTitle>
+        <InfoTooltip text="Indivíduos somados por registro independente — um registro é contado por vídeo; a mesma espécie em vídeos diferentes conta como registros separados." />
+      </div>
+      {pieData.length === 0 ? (
+        <p className="text-sm text-center py-14" style={{ color: "#C3BAA8", ...F }}>
+          Sem indivíduos confirmados ainda
+        </p>
+      ) : (
+        <div className="flex flex-col md:flex-row gap-5 items-center">
+          <div style={{ width: 200, height: 200, flexShrink: 0 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Pie data={pieData} dataKey="value" nameKey="name" innerRadius={55} outerRadius={95} paddingAngle={2}>
+                  {pieData.map((d, i) => (
+                    <Cell key={d.name} fill={colorFor(d.name, i)} />
+                  ))}
+                </Pie>
+                <Tooltip content={<ChartTooltip />} />
+              </PieChart>
+            </ResponsiveContainer>
+          </div>
+
+          <div className="flex-1 flex flex-col gap-1.5 min-w-0 w-full">
+            {pieData.map((d, i) => (
+              <div key={d.name} className="flex items-center justify-between gap-3 text-xs">
+                <span className="flex items-center gap-1.5 min-w-0" style={{ color: "#6B6357" }}>
+                  <span
+                    style={{ width: 8, height: 8, borderRadius: "50%", background: colorFor(d.name, i), flexShrink: 0 }}
+                  />
+                  <span className="truncate" style={{ fontStyle: d.name === UNIDENTIFIED_LABEL ? "normal" : "italic" }}>
+                    {d.name}
+                    {d.name === UNIDENTIFIED_LABEL && blankTotal > 0 && ` (incl. ${blankTotal} sem fauna)`}
+                  </span>
+                </span>
+                <span className="font-semibold shrink-0" style={{ color: "#221F1A" }}>{d.value}</span>
+              </div>
+            ))}
+            <div className="flex justify-between text-xs mt-1 pt-1.5" style={{ borderTop: "1px solid #E7DECF", color: "#6B6357" }}>
+              <span>Total</span>
+              <span className="font-bold" style={{ color: "#221F1A" }}>{total}</span>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function DashboardCharts({ stats }: { stats: StatsData | null }) {
   return (
     <>
       <FaunaBarChart data={stats?.by_fauna_group_and_month ?? []} />
       <CameraBarChart data={stats?.by_camera ?? []} />
+      <SpeciesPieChart richness={stats?.species_richness ?? []} />
     </>
   );
 }

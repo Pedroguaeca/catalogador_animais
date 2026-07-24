@@ -66,7 +66,7 @@ export function CheckoutModal({ open, segments, onClose, onConfirm }: CheckoutMo
         <div className="flex items-center justify-between px-5 py-4 border-b shrink-0" style={{ borderColor: "#EFE8DB" }}>
           <div>
             <p className="font-semibold" style={{ fontSize: 16, color: "#221F1A", ...font }}>
-              Confirmar aparições do vídeo
+              Confirmar registros do vídeo
             </p>
             <p className="text-xs mt-0.5" style={{ color: "#9A9080", ...font }}>
               Revise a quantidade de indivíduos antes de concluir.

@@ -31,6 +31,8 @@ const config: Config = {
           hover: "#C2802B",
           foreground: "#3A2A0E",
         },
+        terracotta: "#C25E3E",
+        info: "#3A7CA5",
         muted: {
           DEFAULT: "#9A9080",
           foreground: "#6B6357",

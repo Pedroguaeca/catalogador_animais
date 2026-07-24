@@ -28,7 +28,7 @@ export function SegmentStrip({ segments, activeSegmentKey, onSelect }: SegmentSt
     >
       <div className="flex items-center px-4 py-2.5 border-b shrink-0" style={{ borderColor: "#EFE8DB" }}>
         <span className="text-xs font-semibold uppercase tracking-widest" style={{ color: "#9A9080", ...font }}>
-          Segmentos do vídeo
+          Registros do vídeo
         </span>
       </div>
 
