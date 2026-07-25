@@ -1639,7 +1639,9 @@ def list_videos(
     project_id: str,
     tenant_id:  str = Depends(get_current_tenant),
 ):
-    """Lista vídeos do projecto com status de display calculado a partir das aparições."""
+    """Lista vídeos do projecto com status de display e registros calculados
+    a partir de siab-frame-annotations (ver _confirmed_appearance_groups) —
+    mesma fonte de /stats e /export."""
     vid_tbl = _videos_table()
 
     vids: list[dict] = []
@@ -1657,11 +1659,13 @@ def list_videos(
             break
         kwargs["ExclusiveStartKey"] = lek
 
-    # Busca todas as aparições do projecto de uma vez (para species/count)
-    appearances = _appearances_from_project(_appearances_table(), tenant_id, project_id)
+    # Busca todos os registros confirmados do projecto de uma vez (para
+    # species/count) — mesmo modelo de dado de /stats e /export, não mais a
+    # siab-appearances antiga (ver _confirmed_appearance_groups).
+    groups = _confirmed_appearance_groups(tenant_id, project_id)
     by_video: dict[str, list[dict]] = {}
-    for a in appearances:
-        by_video.setdefault(a.get("video_id", ""), []).append(a)
+    for g in groups:
+        by_video.setdefault(g.get("video_id", ""), []).append(g)
 
     # Busca anotações de frame do tenant para calcular display_status por vídeo
     ann_tbl = _frame_annotations_table()

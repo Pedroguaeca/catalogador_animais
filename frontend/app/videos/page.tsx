@@ -152,7 +152,7 @@ export default function VideosPage() {
               }}>
                 <thead>
                   <tr style={{ borderBottom: "1px solid #EFE8DB" }}>
-                    {["Ficheiro", "Câmera", "Captura", "Espécies", "Aparições", "Status", "Acções"].map((h) => (
+                    {["Ficheiro", "Câmera", "Captura", "Espécies", "Registros", "Status", "Acções"].map((h) => (
                       <th key={h} style={{
                         padding: "10px 14px", textAlign: "left",
                         fontSize: 11, fontWeight: 600, color: "#9A9080",

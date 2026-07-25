@@ -1044,6 +1044,62 @@ class TestProjectStats(unittest.TestCase):
         self.assertEqual(total_no_grafico, body["total_confirmed"])
 
 
+class TestListVideosUsesConfirmedGroups(unittest.TestCase):
+    """GET /projects/{id}/videos — species/appearance_count migrados de
+    siab-appearances (legado, gap_track do pipeline) pra
+    _confirmed_appearance_groups (SIAB-188, 24/07), mesma fonte de dado de
+    /stats e /export. Antes, um vídeo com a IA oscilando classificação
+    (sem novo_evento marcado) inflava a coluna de registros na tela de
+    Vídeos mesmo já corrigido em /review e no dashboard."""
+
+    def test_species_and_count_come_from_confirmed_groups_not_appearances_table(self):
+        videos = [_video_item("vid-001"), _video_item("vid-002")]
+        vid_tbl = MagicMock()
+        vid_tbl.query.return_value = {"Items": videos}
+        ann_tbl = MagicMock()
+        ann_tbl.query.return_value = {"Items": [
+            _frame_ann_item("vid-001", frame_idx=0, species="metachirus nudicaudatus"),
+            _frame_ann_item("vid-002", frame_idx=0, species="didelphis virginiana"),
+        ]}
+        # Simula o resultado já corrigido de _confirmed_appearance_groups:
+        # vid-001 colapsou pra 1 registro (era 3 antes da correção),
+        # vid-002 tem 2 registros de verdade (novo_evento marcado).
+        fake_groups = [
+            {"video_id": "vid-001", "species": "metachirus nudicaudatus", "segment": 0},
+            {"video_id": "vid-002", "species": "didelphis virginiana", "segment": 0},
+            {"video_id": "vid-002", "species": "leopardus pardalis", "segment": 1},
+        ]
+        with patch("backend.api._videos_table", return_value=vid_tbl), \
+             patch("backend.api._frame_annotations_table", return_value=ann_tbl), \
+             patch("backend.api._confirmed_appearance_groups", return_value=fake_groups) as mock_groups, \
+             patch("backend.api._appearances_table", side_effect=AssertionError(
+                 "list_videos não deve mais consultar siab-appearances")):
+            resp = client.get("/projects/proj-001/videos")
+
+        self.assertEqual(resp.status_code, 200)
+        mock_groups.assert_called_once_with(TENANT_ID, "proj-001")
+        by_id = {v["video_id"]: v for v in resp.json()["videos"]}
+        self.assertEqual(by_id["vid-001"]["species"], ["metachirus nudicaudatus"])
+        self.assertEqual(by_id["vid-001"]["appearance_count"], 1)
+        self.assertEqual(by_id["vid-002"]["species"], ["didelphis virginiana", "leopardus pardalis"])
+        self.assertEqual(by_id["vid-002"]["appearance_count"], 2)
+
+    def test_video_with_no_confirmed_records_shows_empty(self):
+        video = _video_item("vid-003")
+        vid_tbl = MagicMock()
+        vid_tbl.query.return_value = {"Items": [video]}
+        ann_tbl = MagicMock()
+        ann_tbl.query.return_value = {"Items": []}
+        with patch("backend.api._videos_table", return_value=vid_tbl), \
+             patch("backend.api._frame_annotations_table", return_value=ann_tbl), \
+             patch("backend.api._confirmed_appearance_groups", return_value=[]):
+            resp = client.get("/projects/proj-001/videos")
+
+        v = resp.json()["videos"][0]
+        self.assertEqual(v["species"], [])
+        self.assertEqual(v["appearance_count"], 0)
+
+
 class TestVideoSegments(unittest.TestCase):
     """GET /projects/{id}/videos/{id}/segments — resumo consumido pela faixa de
     segmentos e pelo modal de checkout em /review.
