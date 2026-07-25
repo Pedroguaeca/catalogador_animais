@@ -87,43 +87,130 @@ function finalizeSegment(videoId: string, values: CheckoutValues, idToken?: stri
   }).catch(() => {});
 }
 
+// Rótulos de fallback do SpeciesNet que não são espécie de verdade — mesmo
+// dict que _TAXONOMIC_LEVEL_FALLBACK em backend/api.py (ver comentário lá
+// pro porquê de "Paca" e "blank" caírem em "unidentified").
+const TAXONOMIC_LEVEL_FALLBACK: Record<string, string> = {
+  mammalia: "class", aves: "class",
+  didelphidae: "family",
+  rodentia: "order",
+  crypturellus: "genus",
+  blank: "unidentified",
+  paca: "unidentified",
+};
+
+// Rank de especificidade taxonômica — espelha _TAXONOMIC_RANK (backend/api.py).
+const TAXONOMIC_RANK: Record<string, number> = {
+  species: 0,
+  genus: 1,
+  family: 2,
+  order: 2,
+  class: 2,
+  unidentified: 3,
+};
+
+// Espelha _taxonomic_level (backend/api.py): usa o nível persistido pelo
+// pipeline se existir; senão cai no fallback curado acima.
+function taxonomicLevelFor(species: string, persistedLevel?: string | null): string {
+  if (persistedLevel) return persistedLevel;
+  const sp = species.trim().toLowerCase();
+  if (!sp) return "unidentified";
+  if (sp in TAXONOMIC_LEVEL_FALLBACK) return TAXONOMIC_LEVEL_FALLBACK[sp];
+  if (sp.split(" ").length === 2) return "species";
+  return "unidentified";
+}
+
+// Espelha _resolve_segment_species (backend/api.py) — task SIAB-188, 24/07:
+// escolhe a espécie final de um segmento cujos frames podem ter
+// classificações de IA divergentes entre si.
+//   1. Se algum frame do segmento tiver correção humana explícita
+//      (annotationSource != "auto" — passou pelo painel, não só "Confirmar
+//      todos"), vence a mais recente por annotatedAt.
+//   2. Senão, vence a espécie de nível taxonômico mais específico (species >
+//      genus > family/order/class > unidentified); empate no nível é
+//      resolvido por contagem de frames, e empate residual pela ordem de
+//      aparição no vídeo.
+function resolveSegmentSpecies(
+  members: Frame[],
+  annotatedSpecies: Record<number, string>,
+  annotationSource: Record<number, string>,
+  annotatedAt: Record<number, string>,
+): string {
+  const humanCorrected = members.filter((f) => {
+    const src = annotationSource[f.idx];
+    return src !== undefined && src !== "auto";
+  });
+  if (humanCorrected.length > 0) {
+    const latest = humanCorrected.reduce((best, f) =>
+      (annotatedAt[f.idx] ?? "") > (annotatedAt[best.idx] ?? "") ? f : best
+    );
+    return annotatedSpecies[latest.idx];
+  }
+
+  const counts: Record<string, number> = {};
+  const firstSeen: Record<string, number> = {};
+  const level: Record<string, string> = {};
+  members.forEach((f, i) => {
+    const sp = annotatedSpecies[f.idx];
+    if (!sp) return;
+    counts[sp] = (counts[sp] ?? 0) + 1;
+    if (!(sp in firstSeen)) {
+      firstSeen[sp] = i;
+      level[sp] = taxonomicLevelFor(sp, f.taxonomicLevel);
+    }
+  });
+
+  const candidates = Object.keys(counts);
+  candidates.sort((a, b) => {
+    const rankDiff = (TAXONOMIC_RANK[level[a]] ?? 3) - (TAXONOMIC_RANK[level[b]] ?? 3);
+    if (rankDiff !== 0) return rankDiff;
+    if (counts[a] !== counts[b]) return counts[b] - counts[a];
+    return firstSeen[a] - firstSeen[b];
+  });
+  return candidates[0];
+}
+
 // Espelha _frame_segments_for_video (backend/api.py) inteiramente no cliente:
-// mesma regra (video_id, annotated_species, segmento — segmento incrementa a
-// cada novo_evento, contador único por vídeo). Calculado a partir do estado já
-// carregado, sem round-trip ao servidor — evita corrida entre "acabei de
-// confirmar o último frame" e "o GET /segments ainda não viu essa escrita".
+// o vídeo inteiro é 1 segmento por padrão (segmento incrementa só a cada
+// novo_evento, contador único por vídeo) — não mais um grupo por espécie.
+// Calculado a partir do estado já carregado, sem round-trip ao servidor —
+// evita corrida entre "acabei de confirmar o último frame" e "o GET
+// /segments ainda não viu essa escrita".
 interface ComputedSegments {
   segments: VideoSegment[];
-  // frame.path → chave "species#segment", pra destacar a linha ativa na faixa
-  // de segmentos sem depender de sobreposição de faixas de frame_idx entre
-  // espécies diferentes.
+  // frame.path → chave "species#segment" (espécie já resolvida), pra
+  // destacar a linha ativa na faixa de segmentos.
   segmentKeyByFramePath: Record<string, string>;
 }
 
 function computeSegments(
   frames: Frame[],
   annotatedSpecies: Record<number, string>,
+  annotationSource: Record<number, string>,
+  annotatedAt: Record<number, string>,
   novoEventoOverrides: Record<string, boolean>,
   individualCountOverrides: Record<string, number>,
   temFilhoteOverrides: Record<string, boolean>,
 ): ComputedSegments {
   let segment = 0;
-  const groups = new Map<string, { species: string; segment: number; members: Frame[] }>();
-  const segmentKeyByFramePath: Record<string, string> = {};
+  const rawGroups = new Map<number, Frame[]>();
 
   for (const f of frames) {
     const novoEvento = novoEventoOverrides[f.path] ?? f.novoEvento ?? false;
     if (novoEvento) segment += 1;
     const species = annotatedSpecies[f.idx];
     if (!species) continue;
-    const key = `${species}#${segment}`;
-    if (!groups.has(key)) groups.set(key, { species, segment, members: [] });
-    groups.get(key)!.members.push(f);
-    segmentKeyByFramePath[f.path] = key;
+    if (!rawGroups.has(segment)) rawGroups.set(segment, []);
+    rawGroups.get(segment)!.push(f);
   }
 
-  const segments = Array.from(groups.values())
-    .map(({ species, segment, members }) => {
+  const segmentKeyByFramePath: Record<string, string> = {};
+  const segments = Array.from(rawGroups.entries())
+    .map(([segment, members]) => {
+      const species = resolveSegmentSpecies(members, annotatedSpecies, annotationSource, annotatedAt);
+      const key = `${species}#${segment}`;
+      for (const f of members) segmentKeyByFramePath[f.path] = key;
+
       const counts = members.map((f) => individualCountOverrides[f.path] ?? f.individualCount ?? 1);
       const idxs = members.map((f) => f.rawFrameIdx);
       return {
@@ -181,15 +268,23 @@ export function ReviewPage({ videos, initialVideoId, projectId }: ReviewPageProp
   const annotatedAtLabel = state.annotatedAt[state.frameIdx] ?? null;
 
   const { segments, segmentKeyByFramePath } = useMemo(
-    () => computeSegments(frames, state.annotatedSpecies, novoEventoOverrides, individualCountOverrides, temFilhoteOverrides),
-    [frames, state.annotatedSpecies, novoEventoOverrides, individualCountOverrides, temFilhoteOverrides]
+    () => computeSegments(
+      frames,
+      state.annotatedSpecies,
+      state.annotationSource,
+      state.annotatedAt,
+      novoEventoOverrides,
+      individualCountOverrides,
+      temFilhoteOverrides,
+    ),
+    [frames, state.annotatedSpecies, state.annotationSource, state.annotatedAt, novoEventoOverrides, individualCountOverrides, temFilhoteOverrides]
   );
   const activeSegmentKey = frame ? segmentKeyByFramePath[frame.path] ?? null : null;
 
   const confirmFrame = useCallback(() => {
     if (!frame?.detection) return;
     dispatch({ type: "CONFIRM_AI" });
-    dispatch({ type: "MARK_ANNOTATED", payload: { species: frame.detection.genus_pt } });
+    dispatch({ type: "MARK_ANNOTATED", payload: { species: frame.detection.genus_pt, source: "ai_confirm" } });
     if (frame.path) persistFrameAnnotation(state.videoId, frame.path, frame.detection.genus, "ai_confirm", idToken);
   }, [frame, state.videoId, idToken]);
 
@@ -363,7 +458,7 @@ export function ReviewPage({ videos, initialVideoId, projectId }: ReviewPageProp
           onSelect={(id) => {
             const name = state.categories.find((c) => c.id === id)?.name ?? id;
             dispatch({ type: "SELECT", payload: id });
-            dispatch({ type: "MARK_ANNOTATED", payload: { species: name } });
+            dispatch({ type: "MARK_ANNOTATED", payload: { species: name, source: "chip_select" } });
             if (frame?.path) {
               persistFrameAnnotation(state.videoId, frame.path, name, "chip_select", idToken);
             }
@@ -382,7 +477,7 @@ export function ReviewPage({ videos, initialVideoId, projectId }: ReviewPageProp
           onNewCatName={(n) => dispatch({ type: "SET_NEW_CAT_NAME", payload: n })}
           onAddCategory={(name) => {
             dispatch({ type: "ADD_CATEGORY", payload: name });
-            dispatch({ type: "MARK_ANNOTATED", payload: { species: name } });
+            dispatch({ type: "MARK_ANNOTATED", payload: { species: name, source: "new_category" } });
             if (frame?.path) {
               persistFrameAnnotation(state.videoId, frame.path, name, "new_category", idToken);
             }

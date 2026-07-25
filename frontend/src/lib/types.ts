@@ -23,6 +23,8 @@ export interface Frame {
   annotatedSpecies?: string | null; // espécie confirmada (vinda da API no load inicial)
   annotatedAt?: string | null;      // timestamp ISO da confirmação (para "Confirmado · há X")
   individualCount?: number;         // quantidade de indivíduos marcada neste frame (default 1)
+  annotationSource?: string | null; // "auto" (Confirmar todos) vs correção humana explícita — ver resolveSegmentSpecies
+  taxonomicLevel?: string | null;   // nivel_taxonomico persistido pelo pipeline (ver _taxonomic_level no backend)
 }
 
 export interface VideoSegment {
@@ -63,7 +65,7 @@ export type ReviewAction =
   | { type: "CLOSE_NEW_CAT" }
   | { type: "SET_NEW_CAT_NAME"; payload: string }
   | { type: "ADD_CATEGORY"; payload: string }
-  | { type: "MARK_ANNOTATED"; payload: { species: string } }
+  | { type: "MARK_ANNOTATED"; payload: { species: string; source: "ai_confirm" | "chip_select" | "new_category" } }
   | { type: "CONFIRM_ALL_VIDEO"; payload: { frames: Frame[] } };
 
 export interface ReviewState {
@@ -83,4 +85,8 @@ export interface ReviewState {
   annotatedSpecies: Record<number, string>;
   // Timestamp da confirmação por posição de frame — supre "Confirmado · há X".
   annotatedAt: Record<number, string>;
+  // Origem da confirmação por posição de frame ("auto" vs correção humana
+  // explícita) — usada por resolveSegmentSpecies (ReviewPage.tsx) pra
+  // escolher a espécie final de um segmento com classificações divergentes.
+  annotationSource: Record<number, string>;
 }

@@ -461,6 +461,56 @@ def _taxonomic_level(item: dict) -> str:
     return "unidentified"
 
 
+# Rank de especificidade taxonômica — usado só como critério de desempate
+# em _resolve_segment_species (menor rank = mais específico = vence).
+_TAXONOMIC_RANK: dict[str, int] = {
+    "species": 0,
+    "genus": 1,
+    "family": 2,
+    "order": 2,
+    "class": 2,
+    "unidentified": 3,
+}
+
+
+def _resolve_segment_species(members: list[dict]) -> str:
+    """Escolhe a espécie final de um segmento cujos frames podem ter
+    classificações de IA divergentes entre si (oscilação — task SIAB-188,
+    24/07).
+
+    1. Se algum frame tiver correção humana explícita (annotation_source
+       diferente de "auto" — passou pelo painel de identificação, não só
+       pelo "Confirmar todos" em massa), vence a mais recente por
+       annotated_at.
+    2. Senão — o caso comum hoje, já que "Confirmar todos" não é uma escolha
+       deliberada por frame — vence a espécie de nível taxonômico mais
+       específico (species > genus > family/order/class > unidentified);
+       empate no nível é resolvido por contagem de frames, e empate
+       residual pela ordem de aparição (primeiro frame do vídeo).
+    """
+    human_corrected = [m for m in members if m.get("annotation_source") not in (None, "auto")]
+    if human_corrected:
+        latest = max(human_corrected, key=lambda m: m.get("annotated_at") or "")
+        return latest["annotated_species"]
+
+    counts: dict[str, int] = {}
+    first_seen: dict[str, int] = {}
+    level: dict[str, str] = {}
+    for i, m in enumerate(members):
+        sp = m.get("annotated_species")
+        if not sp:
+            continue
+        counts[sp] = counts.get(sp, 0) + 1
+        if sp not in first_seen:
+            first_seen[sp] = i
+            level[sp] = _taxonomic_level(m)
+
+    return min(
+        counts,
+        key=lambda sp: (_TAXONOMIC_RANK.get(level[sp], 3), -counts[sp], first_seen[sp]),
+    )
+
+
 def _ts_parts(ts: str | None) -> tuple[str, str]:
     """Separa ts_start ISO em (data DD/MM/YYYY, horário HH:MM:SS)."""
     if not ts or len(ts) < 19:
@@ -581,12 +631,20 @@ def _check_discrepancy(appearance_id: str, app_sk: str, tenant_id: str) -> None:
         )
 
 
-def _frame_segments_for_video(tenant_id: str, video_id: str) -> dict[tuple[str, int], list[dict]]:
-    """Agrupa as frame-annotations confirmadas de um vídeo por (annotated_species, segmento).
+def _frame_segments_for_video(tenant_id: str, video_id: str) -> dict[int, dict]:
+    """Agrupa as frame-annotations confirmadas de um vídeo por segmento.
 
-    Segmento começa em 0 e incrementa a cada frame (na ordem de frame_idx) marcado
-    com novo_evento=true — independente da espécie. Sem nenhuma marca no vídeo,
-    todo mundo fica no segmento 0, e o agrupamento equivale a (video_id, species).
+    O vídeo inteiro é 1 segmento (0) por padrão — todas as classificações de
+    espécie que a IA sugerir entre frames (mesmo oscilando) colapsam num
+    único registro. Um novo segmento só começa num frame marcado com
+    novo_evento=true (ação humana explícita), na ordem de frame_idx. Ver
+    _resolve_segment_species pra como a espécie final do segmento é
+    escolhida quando os frames do segmento discordam entre si.
+
+    (Antes agrupava por (species, segmento) — mudança SIAB-188, 24/07:
+    species entrando na chave da tupla inflava os registros toda vez que a
+    IA oscilava a classificação sem o revisor marcar novo evento; ver task
+    do Notion "Registro independente deve ser 1 por vídeo por padrão".)
     """
     ann_tbl = _frame_annotations_table()
     frames: list[dict] = []
@@ -606,15 +664,18 @@ def _frame_segments_for_video(tenant_id: str, video_id: str) -> dict[tuple[str, 
     frames.sort(key=lambda f: int(f.get("frame_idx", 0)))
 
     segment = 0
-    groups: dict[tuple[str, int], list[dict]] = {}
+    raw_groups: dict[int, list[dict]] = {}
     for f in frames:
         if f.get("novo_evento"):
             segment += 1
-        species = f.get("annotated_species")
-        if not species:
+        if not f.get("annotated_species"):
             continue
-        groups.setdefault((species, segment), []).append(f)
-    return groups
+        raw_groups.setdefault(segment, []).append(f)
+
+    return {
+        seg: {"species": _resolve_segment_species(members), "members": members}
+        for seg, members in raw_groups.items()
+    }
 
 
 def _confirmed_appearance_groups(tenant_id: str, project_id: str) -> list[dict]:
@@ -622,8 +683,8 @@ def _confirmed_appearance_groups(tenant_id: str, project_id: str) -> list[dict]:
     siab-frame-annotations — substitui a leitura antiga em siab-appearances
     (review_status nunca é promovido a 'confirmed' lá desde a Fase 1/2 do /review).
 
-    Uma aparição = grupo de frames confirmados de um vídeo com a mesma
-    (annotated_species, segmento). Ver _frame_segments_for_video.
+    Uma aparição = 1 segmento confirmado de um vídeo (por padrão, o vídeo
+    inteiro). Ver _frame_segments_for_video e _resolve_segment_species.
     """
     videos: list[dict] = []
     kwargs: dict = {
@@ -643,14 +704,21 @@ def _confirmed_appearance_groups(tenant_id: str, project_id: str) -> list[dict]:
     groups: list[dict] = []
     for v in videos:
         video_id = v.get("video_id", "")
-        for (species, segment), members in _frame_segments_for_video(tenant_id, video_id).items():
-            scores = [float(m["ai_score"]) for m in members if m.get("ai_score") is not None]
-            best = max(members, key=lambda m: float(m.get("ai_score", 0)))
+        for segment, group in _frame_segments_for_video(tenant_id, video_id).items():
+            members = group["members"]
+            species = group["species"]
+            # ai_score/taxonomic_level/crop refletem só os frames que a IA de
+            # fato classificou como a espécie final escolhida — não a média/
+            # melhor frame do segmento inteiro, que pode ter frames de outras
+            # classificações (oscilação da IA) misturados.
+            species_members = [m for m in members if m.get("annotated_species") == species]
+            scores = [float(m["ai_score"]) for m in species_members if m.get("ai_score") is not None]
+            best = max(species_members, key=lambda m: float(m.get("ai_score", 0)))
             individual_counts = [
                 int(m["individual_count"]) for m in members if m.get("individual_count") is not None
             ]
             groups.append({
-                "appearance_key":   f"{video_id}#{species}#{segment}",
+                "appearance_key":   f"{video_id}#{segment}",
                 "video_id":         video_id,
                 "project_id":       project_id,
                 "species":          species,
@@ -661,7 +729,7 @@ def _confirmed_appearance_groups(tenant_id: str, project_id: str) -> list[dict]:
                 "taxonomic_path":   None,  # não persistido por frame — ver ADR/Notion 16/07
                 "taxonomic_level":  _taxonomic_level(best),
                 "species_score":    (sum(scores) / len(scores)) if scores else 0.0,
-                "individual_count": individual_counts[0] if individual_counts else 1,
+                "individual_count": max(individual_counts) if individual_counts else 1,
                 "best_crop_s3_key": best.get("frame_s3_key", ""),
                 "support_frames":   len(members),
             })
@@ -1136,14 +1204,20 @@ def set_individual_count(
 ):
     """Consolida os metadados finais de uma aparição confirmada (checkout do
     vídeo, ou edição pontual): individual_count (obrigatório, padrão 1 no
-    modal) e tem_filhote (opcional) — grava em todos os frames do grupo
-    (video_id, species, segment). Ver _frame_segments_for_video."""
+    modal) e tem_filhote (opcional) — grava em todos os frames do segmento
+    (video_id, segment). Ver _frame_segments_for_video.
+
+    body.species não é mais usado pra localizar o grupo (o segmento já é
+    único por vídeo) — mantido no schema só por compatibilidade com o
+    payload que o frontend já envia (espelha VideoSegment.species)."""
     if body.individual_count < 1:
         raise HTTPException(status_code=422, detail="individual_count deve ser >= 1")
 
-    members = _frame_segments_for_video(tenant_id, body.video_id).get((body.species, body.segment))
-    if not members:
-        raise HTTPException(status_code=404, detail="Aparição não encontrada para esse vídeo/espécie/segmento.")
+    group = _frame_segments_for_video(tenant_id, body.video_id).get(body.segment)
+    if not group:
+        raise HTTPException(status_code=404, detail="Aparição não encontrada para esse vídeo/segmento.")
+    members = group["members"]
+    species = group["species"]
 
     update_expr = "SET individual_count = :ic"
     expr_vals: dict = {":ic": body.individual_count}
@@ -1161,7 +1235,7 @@ def set_individual_count(
     return {
         "status":           "ok",
         "video_id":         body.video_id,
-        "species":          body.species,
+        "species":          species,
         "segment":          body.segment,
         "individual_count": body.individual_count,
         "tem_filhote":      body.tem_filhote,
@@ -1261,11 +1335,12 @@ def list_video_segments(
     groups = _frame_segments_for_video(tenant_id, video_id)
 
     segments = []
-    for (species, segment), members in groups.items():
+    for segment, group in groups.items():
+        members = group["members"]
         idxs = [int(m.get("frame_idx", 0)) for m in members]
         counts = [int(m["individual_count"]) for m in members if m.get("individual_count") is not None]
         segments.append({
-            "species":          species,
+            "species":          group["species"],
             "segment":          segment,
             "frame_start":      min(idxs),
             "frame_end":        max(idxs),

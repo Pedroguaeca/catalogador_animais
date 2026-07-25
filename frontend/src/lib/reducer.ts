@@ -25,6 +25,15 @@ function preAnnotatedAt(frames: Frame[]): Record<number, string> {
   return map;
 }
 
+// Idem para annotation_source — supre resolveSegmentSpecies (ReviewPage.tsx).
+function preAnnotatedSource(frames: Frame[]): Record<number, string> {
+  const map: Record<number, string> = {};
+  for (const f of frames) {
+    if (f.status === "detection" && f.annotationSource) map[f.idx] = f.annotationSource;
+  }
+  return map;
+}
+
 export const DEFAULT_CATEGORIES: Category[] = [
   { id: "aramides",     name: "Aramides" },
   { id: "crypturellus", name: "Crypturellus" },
@@ -55,6 +64,7 @@ export const initialState = (videoId: string, frames: Frame[]): ReviewState => {
     annotatedFrames,
     annotatedSpecies: preAnnotatedSpecies(frames),
     annotatedAt: preAnnotatedAt(frames),
+    annotationSource: preAnnotatedSource(frames),
   };
 };
 
@@ -81,6 +91,7 @@ export function reviewReducer(state: ReviewState, action: ReviewAction): ReviewS
         annotated: alreadyMarked ? state.annotated : state.annotated + 1,
         annotatedSpecies: { ...state.annotatedSpecies, [state.frameIdx]: action.payload.species },
         annotatedAt: { ...state.annotatedAt, [state.frameIdx]: new Date().toISOString() },
+        annotationSource: { ...state.annotationSource, [state.frameIdx]: action.payload.source },
       };
     }
 
@@ -109,6 +120,7 @@ export function reviewReducer(state: ReviewState, action: ReviewAction): ReviewS
         annotated: annotatedFrames.size,
         annotatedSpecies: preAnnotatedSpecies(action.payload.frames),
         annotatedAt: preAnnotatedAt(action.payload.frames),
+        annotationSource: preAnnotatedSource(action.payload.frames),
       };
     }
 
@@ -126,17 +138,29 @@ export function reviewReducer(state: ReviewState, action: ReviewAction): ReviewS
       const next = new Set(state.annotatedFrames);
       const nextSpecies = { ...state.annotatedSpecies };
       const nextAt = { ...state.annotatedAt };
+      const nextSource = { ...state.annotationSource };
       const now = new Date().toISOString();
       for (const f of frames) {
         next.add(f.idx);
         // "Confirmar vídeo" aplica o palpite da IA a cada frame — só sobrescreve
         // o nome exibido se ainda não havia correção humana anterior pro frame.
+        // annotationSource="auto" (não é escolha deliberada por frame) — ver
+        // resolveSegmentSpecies, que trata isso como não-corrigido.
         if (f.detection && nextSpecies[f.idx] === undefined) {
           nextSpecies[f.idx] = f.detection.genus_pt;
           nextAt[f.idx] = now;
+          nextSource[f.idx] = "auto";
         }
       }
-      return { ...state, annotatedFrames: next, annotated: next.size, annotatedSpecies: nextSpecies, annotatedAt: nextAt, confirmed: true };
+      return {
+        ...state,
+        annotatedFrames: next,
+        annotated: next.size,
+        annotatedSpecies: nextSpecies,
+        annotatedAt: nextAt,
+        annotationSource: nextSource,
+        confirmed: true,
+      };
     }
 
     case "ADD_CATEGORY": {

@@ -94,6 +94,8 @@ def _frame_ann_item(
     novo_evento: bool | None = None,
     individual_count: int | None = None,
     taxonomic_level: str | None = None,
+    annotation_source: str | None = None,
+    annotated_at: str | None = None,
 ) -> dict:
     item: dict = {
         "tenant_id":          TENANT_ID,
@@ -112,6 +114,10 @@ def _frame_ann_item(
         item["individual_count"] = individual_count
     if taxonomic_level is not None:
         item["taxonomic_level"] = taxonomic_level
+    if annotation_source is not None:
+        item["annotation_source"] = annotation_source
+    if annotated_at is not None:
+        item["annotated_at"] = annotated_at
     return item
 
 
@@ -1040,9 +1046,18 @@ class TestProjectStats(unittest.TestCase):
 
 class TestVideoSegments(unittest.TestCase):
     """GET /projects/{id}/videos/{id}/segments — resumo consumido pela faixa de
-    segmentos e pelo modal de checkout em /review."""
+    segmentos e pelo modal de checkout em /review.
 
-    def test_segments_summarize_species_range_and_individual_count(self):
+    Desde a task SIAB-188 (24/07), o vídeo inteiro é 1 segmento por padrão —
+    classificações de espécie divergentes entre frames colapsam num único
+    registro, exceto onde o revisor marcou novo_evento explicitamente.
+    """
+
+    def test_whole_video_collapses_to_one_segment_by_default(self):
+        """Oscilação da IA entre 2 espécies, sem novo_evento algum: 1 registro
+        só, com a espécie de maior frame-count vencendo (ambas são nível
+        'species', então o desempate é por contagem de frames) e
+        individual_count = max() entre todos os frames do segmento."""
         ann_tbl = MagicMock()
         ann_tbl.query.return_value = {"Items": [
             _frame_ann_item("v1", frame_idx=0, species="didelphis virginiana", individual_count=2),
@@ -1053,12 +1068,33 @@ class TestVideoSegments(unittest.TestCase):
         with patch("backend.api._frame_annotations_table", return_value=ann_tbl):
             resp = client.get("/projects/proj-001/videos/v1/segments")
         self.assertEqual(resp.status_code, 200)
-        segs = {s["species"]: s for s in resp.json()["segments"]}
-        self.assertEqual(segs["didelphis virginiana"]["frame_start"], 0)
-        self.assertEqual(segs["didelphis virginiana"]["frame_end"], 2)
-        self.assertEqual(segs["didelphis virginiana"]["frame_count"], 3)
-        self.assertEqual(segs["didelphis virginiana"]["individual_count"], 2)  # maior valor marcado
-        self.assertEqual(segs["puma concolor"]["individual_count"], 1)  # default
+        segments = resp.json()["segments"]
+        self.assertEqual(len(segments), 1)
+        seg = segments[0]
+        self.assertEqual(seg["species"], "didelphis virginiana")  # 3 frames vs 1
+        self.assertEqual(seg["frame_start"], 0)
+        self.assertEqual(seg["frame_end"], 10)
+        self.assertEqual(seg["frame_count"], 4)
+        self.assertEqual(seg["individual_count"], 2)  # max() entre todos os frames do segmento
+
+    def test_novo_evento_still_splits_into_multiple_segments(self):
+        """novo_evento continua sendo a única forma de quebrar em múltiplos
+        registros dentro do mesmo vídeo."""
+        ann_tbl = MagicMock()
+        ann_tbl.query.return_value = {"Items": [
+            _frame_ann_item("v1", frame_idx=0, species="didelphis virginiana"),
+            _frame_ann_item("v1", frame_idx=1, species="didelphis virginiana"),
+            _frame_ann_item("v1", frame_idx=2, species="puma concolor", novo_evento=True),
+            _frame_ann_item("v1", frame_idx=3, species="puma concolor"),
+        ]}
+        with patch("backend.api._frame_annotations_table", return_value=ann_tbl):
+            resp = client.get("/projects/proj-001/videos/v1/segments")
+        segments = sorted(resp.json()["segments"], key=lambda s: s["frame_start"])
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(segments[0]["species"], "didelphis virginiana")
+        self.assertEqual(segments[0]["frame_count"], 2)
+        self.assertEqual(segments[1]["species"], "puma concolor")
+        self.assertEqual(segments[1]["frame_count"], 2)
 
     def test_segments_empty_video(self):
         ann_tbl = MagicMock()
@@ -1066,6 +1102,53 @@ class TestVideoSegments(unittest.TestCase):
         with patch("backend.api._frame_annotations_table", return_value=ann_tbl):
             resp = client.get("/projects/proj-001/videos/v1/segments")
         self.assertEqual(resp.json()["segments"], [])
+
+
+class TestResolveSegmentSpecies(unittest.TestCase):
+    """_resolve_segment_species — escolha da espécie final de um segmento com
+    classificações de IA divergentes entre frames (task SIAB-188, 24/07)."""
+
+    def test_specificity_beats_raw_majority(self):
+        """Caso real documentado (DSCF0022/DSCF0044): rótulo de fallback
+        genérico ('mammalia', nível classe) domina em frame-count sobre a
+        espécie real (nível species) minoritária — a espécie de nível mais
+        específico deve vencer, não a maioria bruta."""
+        from backend.api import _resolve_segment_species
+        members = (
+            [_frame_ann_item("v1", frame_idx=i, species="mammalia", taxonomic_level="class") for i in range(1, 29)]
+            + [_frame_ann_item("v1", frame_idx=0, species="metachirus nudicaudatus", taxonomic_level="species")]
+        )
+        self.assertEqual(_resolve_segment_species(members), "metachirus nudicaudatus")
+
+    def test_tie_within_same_level_uses_frame_count(self):
+        from backend.api import _resolve_segment_species
+        members = (
+            [_frame_ann_item("v1", frame_idx=i, species="didelphis virginiana", taxonomic_level="species") for i in range(24)]
+            + [_frame_ann_item("v1", frame_idx=100 + i, species="didelphis marsupialis", taxonomic_level="species") for i in range(6)]
+        )
+        self.assertEqual(_resolve_segment_species(members), "didelphis virginiana")
+
+    def test_human_correction_wins_over_majority(self):
+        """Correção humana explícita (annotation_source != 'auto') vence a
+        regra de especificidade/maioria, mesmo se for minoritária."""
+        from backend.api import _resolve_segment_species
+        members = (
+            [_frame_ann_item("v1", frame_idx=i, species="mammalia", taxonomic_level="class",
+                              annotation_source="auto") for i in range(20)]
+            + [_frame_ann_item("v1", frame_idx=99, species="cuniculus paca", taxonomic_level="species",
+                                annotation_source="chip_select", annotated_at="2026-07-24T10:00:00")]
+        )
+        self.assertEqual(_resolve_segment_species(members), "cuniculus paca")
+
+    def test_latest_human_correction_wins_among_several(self):
+        from backend.api import _resolve_segment_species
+        members = [
+            _frame_ann_item("v1", frame_idx=0, species="leopardus wiedii",
+                             annotation_source="chip_select", annotated_at="2026-07-24T09:00:00"),
+            _frame_ann_item("v1", frame_idx=1, species="leopardus pardalis",
+                             annotation_source="chip_select", annotated_at="2026-07-24T11:00:00"),
+        ]
+        self.assertEqual(_resolve_segment_species(members), "leopardus pardalis")
 
 
 class TestFrameIndividualCount(unittest.TestCase):

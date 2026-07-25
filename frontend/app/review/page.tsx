@@ -29,6 +29,8 @@ interface ApiFrameItem {
   tem_filhote?:      boolean | null;
   individual_count?: number | null;
   annotated_at?:      string | null;
+  annotation_source?: string | null;
+  taxonomic_level?:   string | null;
 }
 
 // Frame-annotations só existem para frames onde o MegaDetector encontrou algo
@@ -59,6 +61,8 @@ function mapFrames(items: ApiFrameItem[]): Frame[] {
     annotatedSpecies: f.annotated_species ?? undefined,
     annotatedAt: f.annotated_at ?? undefined,
     individualCount: f.individual_count ?? 1,
+    annotationSource: f.annotation_source ?? undefined,
+    taxonomicLevel: f.taxonomic_level ?? undefined,
   }));
 }
 
