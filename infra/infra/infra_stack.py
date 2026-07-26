@@ -117,12 +117,19 @@ class InfraStack(Stack):
             **_common,
         )
 
+        # Passo B/2 da reconciliação de drift (25/07): volta a ser um recurso
+        # AWS::DynamoDB::Table de verdade (não mais from_table_name) — agora
+        # com o schema CORRETO e definitivo (video_id#frame_idx, sem a
+        # mentira temporária do passo A). A tabela está órfã (fora de
+        # qualquer stack, RETAIN aplicado); `cdk import` regista a posse do
+        # CloudFormation usando o estado real como verdade, sem recriar nada.
         frame_annotations = ddb.Table(
             self, "SiabFrameAnnotations",
             table_name="siab-frame-annotations",
             partition_key=ddb.Attribute(name="tenant_id",         type=ddb.AttributeType.STRING),
             sort_key=    ddb.Attribute(name="video_id#frame_idx", type=ddb.AttributeType.STRING),
-            **_common,
+            billing_mode=ddb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.RETAIN,
         )
 
         species = ddb.Table(
