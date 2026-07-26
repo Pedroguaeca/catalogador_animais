@@ -33,6 +33,9 @@ MODEL_LOCAL_DIR   = os.environ.get("SN_MODEL_LOCAL_DIR", "/tmp/models/speciesnet
 # Cache em memória: model_name → objeto SpeciesNet carregado
 _model_cache: dict[str, Any] = {}
 
+# Cache em memória: model_name → SpeciesNetEnsemble (taxonomy_map + geofence_map)
+_ensemble_cache: dict[str, Any] = {}
+
 # Arquivos esperados no diretório do modelo (info.json é o sentinel de cache)
 _MODEL_FILES = [
     "info.json",
@@ -170,6 +173,22 @@ def _get_model(model_name: str):
     return _model_cache[model_name]
 
 
+def _get_ensemble(model_name: str):
+    """Carrega taxonomy_map + geofence_map (via SpeciesNetEnsemble), cacheando entre
+    invocações quentes.
+
+    Reaproveita os arquivos taxonomy_release/geofence_release já baixados em
+    _MODEL_FILES — não baixa nada extra. Não carrega detector nem classifier
+    (SpeciesNetEnsemble sozinho só lê os dois arquivos e monta os dicts).
+    """
+    if model_name not in _ensemble_cache:
+        from speciesnet.ensemble import SpeciesNetEnsemble  # import pesado adiado
+        logger.info("Carregando SpeciesNetEnsemble (geofence): %s", model_name)
+        _ensemble_cache[model_name] = SpeciesNetEnsemble(model_name, geofence=True)
+        logger.info("SpeciesNetEnsemble carregado.")
+    return _ensemble_cache[model_name]
+
+
 # ── Função principal ──────────────────────────────────────────────────────────
 
 
@@ -207,9 +226,11 @@ def classify_species(
     model_name = model_name or MODEL_NAME
     s3         = s3_client or boto3.client("s3")
     model      = _get_model(model_name)
+    ensemble   = _get_ensemble(model_name) if country else None
 
     # Imports adiados (pesados)
     import PIL.Image
+    from speciesnet.geofence_utils import geofence_animal_classification
     from speciesnet.utils import BBox
 
     tmpdir = tempfile.mkdtemp(prefix="sn_", dir="/tmp")
@@ -262,8 +283,22 @@ def classify_species(
                 continue
 
             cls_info = pred["classifications"]
-            label    = cls_info["classes"][0]
-            score    = float(cls_info["scores"][0])
+            labels   = cls_info["classes"]
+            scores   = cls_info["scores"]
+
+            if ensemble is not None:
+                label, score, _source = geofence_animal_classification(
+                    labels=labels,
+                    scores=scores,
+                    country=country,
+                    admin1_region=None,
+                    taxonomy_map=ensemble.taxonomy_map,
+                    geofence_map=ensemble.geofence_map,
+                    enable_geofence=True,
+                )
+            else:
+                label, score = labels[0], float(scores[0])
+
             species, level, tax_path = _parse_label(label)
 
             classifications.append(Classification(

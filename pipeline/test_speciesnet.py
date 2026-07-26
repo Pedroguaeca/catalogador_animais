@@ -10,6 +10,7 @@ import uuid
 from decimal import Decimal
 from unittest.mock import MagicMock, call, patch
 
+import PIL.Image
 import pytest
 from botocore.exceptions import ClientError
 
@@ -28,6 +29,11 @@ from pipeline.speciesnet_handler import (
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def _write_dummy_jpeg(path: str) -> None:
+    """Escreve um JPEG mínimo válido — PIL.Image.open() precisa de bytes reais."""
+    PIL.Image.new("RGB", (10, 10), color=(120, 120, 120)).save(path, format="JPEG")
 
 
 def make_det(frame_num: int, tenant="t1", video="v1", conf=0.8):
@@ -123,38 +129,32 @@ class TestParseLabel:
 
 
 class TestClassifySpecies:
-    """Testa classify_species com SpeciesNet e S3 mockados."""
+    """Testa classify_species com SpeciesNet e S3 mockados.
 
-    def _mock_classify_fn(self, label="abc;mammalia;rodentia;dasyproctidae;dasyprocta;leporina;agouti", score=0.9):
-        """Retorna um side_effect para model.classify que usa os filepaths reais."""
+    O pipeline chama model.classifier.preprocess()/predict() por detecção
+    (não o model.classify() em lote) para evitar SemLock no Lambda — ver
+    comentário em speciesnet.py:255. Os mocks abaixo refletem essa API real.
+    """
 
-        def _classify(filepaths, detections_dict, run_mode="multi_thread", **kwargs):
-            return {
-                "predictions": [
-                    {
-                        "filepath": fp,
-                        "classifications": {
-                            "classes": [label],
-                            "scores": [score],
-                        },
-                        "model_version": "speciesnet-v5.0.5",
-                    }
-                    for fp in filepaths
-                ]
-            }
-
-        return _classify
+    def _mock_model(self, label="abc;mammalia;rodentia;dasyproctidae;dasyprocta;leporina;agouti", score=0.9):
+        """Retorna um MagicMock de SpeciesNet com .classifier.preprocess/predict mockados."""
+        mock_model = MagicMock()
+        mock_model.classifier.preprocess.return_value = "preprocessed"
+        mock_model.classifier.predict.return_value = {
+            "classifications": {"classes": [label], "scores": [score]},
+            "model_version": "speciesnet-v5.0.5",
+        }
+        return mock_model
 
     def test_returns_one_classification_per_detection(self, tmp_path):
         dets = [make_det(1), make_det(2)]
 
         def fake_download(bucket, key, local_path):
-            open(local_path, "wb").close()
+            _write_dummy_jpeg(local_path)
 
         mock_s3 = MagicMock()
         mock_s3.download_file.side_effect = fake_download
-        mock_model = MagicMock()
-        mock_model.classify.side_effect = self._mock_classify_fn()
+        mock_model = self._mock_model()
 
         with patch("pipeline.speciesnet._get_model", return_value=mock_model), \
              patch("pipeline.speciesnet.boto3.client", return_value=mock_s3):
@@ -167,12 +167,11 @@ class TestClassifySpecies:
         dets = [make_det(1)]
 
         def fake_download(bucket, key, local_path):
-            open(local_path, "wb").close()
+            _write_dummy_jpeg(local_path)
 
         mock_s3 = MagicMock()
         mock_s3.download_file.side_effect = fake_download
-        mock_model = MagicMock()
-        mock_model.classify.side_effect = self._mock_classify_fn(
+        mock_model = self._mock_model(
             label="abc;mammalia;rodentia;dasyproctidae;dasyprocta;leporina;agouti",
             score=0.87,
         )
@@ -195,12 +194,11 @@ class TestClassifySpecies:
         def fake_download(bucket, key, local_path):
             if "frame_00001" in key:
                 raise ClientError({"Error": {"Code": "NoSuchKey", "Message": ""}}, "GetObject")
-            open(local_path, "wb").close()
+            _write_dummy_jpeg(local_path)
 
         mock_s3 = MagicMock()
         mock_s3.download_file.side_effect = fake_download
-        mock_model = MagicMock()
-        mock_model.classify.side_effect = self._mock_classify_fn(score=0.7)
+        mock_model = self._mock_model(score=0.7)
 
         with patch("pipeline.speciesnet._get_model", return_value=mock_model), \
              patch("pipeline.speciesnet.boto3.client", return_value=mock_s3):
@@ -214,14 +212,13 @@ class TestClassifySpecies:
         dets = [make_det(1)]
 
         def fake_download(bucket, key, local_path):
-            open(local_path, "wb").close()
+            _write_dummy_jpeg(local_path)
 
         mock_s3 = MagicMock()
         mock_s3.download_file.side_effect = fake_download
         mock_model = MagicMock()
-        mock_model.classify.return_value = {
-            "predictions": [{"filepath": "irrelevant", "failures": ["CLASSIFIER"]}]
-        }
+        mock_model.classifier.preprocess.return_value = "preprocessed"
+        mock_model.classifier.predict.return_value = {"failures": ["CLASSIFIER"]}
 
         with patch("pipeline.speciesnet._get_model", return_value=mock_model), \
              patch("pipeline.speciesnet.boto3.client", return_value=mock_s3):
@@ -230,24 +227,22 @@ class TestClassifySpecies:
         assert result == []
 
     def test_deduplicates_frames_for_classifier(self, tmp_path):
-        # Duas detecções no mesmo frame (dois animais) → classify chamado com 1 filepath
+        # Duas detecções no mesmo frame (dois animais) → download/classificação 1x
         dets = [make_det(1), make_det(1)]
 
         def fake_download(bucket, key, local_path):
-            open(local_path, "wb").close()
+            _write_dummy_jpeg(local_path)
 
         mock_s3 = MagicMock()
         mock_s3.download_file.side_effect = fake_download
-        mock_model = MagicMock()
-        mock_model.classify.side_effect = self._mock_classify_fn()
+        mock_model = self._mock_model()
 
         with patch("pipeline.speciesnet._get_model", return_value=mock_model), \
              patch("pipeline.speciesnet.boto3.client", return_value=mock_s3):
             result = classify_species(dets, "t1")
 
-        # classify chamado com 1 filepath único
-        called_fps = mock_model.classify.call_args[1]["filepaths"]
-        assert len(called_fps) == 1
+        # download_file chamado 1x só (frame único)
+        assert mock_s3.download_file.call_count == 1
         # mas ambas as detecções recebem resultado
         assert len(result) == 2
 
@@ -261,38 +256,133 @@ class TestClassifySpecies:
         )
 
         def fake_download(bucket, key, local_path):
-            open(local_path, "wb").close()
+            _write_dummy_jpeg(local_path)
 
         mock_s3 = MagicMock()
         mock_s3.download_file.side_effect = fake_download
-        mock_model = MagicMock()
-        mock_model.classify.side_effect = self._mock_classify_fn()
+        mock_model = self._mock_model()
 
         with patch("pipeline.speciesnet._get_model", return_value=mock_model), \
              patch("pipeline.speciesnet.boto3.client", return_value=mock_s3):
             classify_species(dets, "t1")
 
-        det_dict = mock_model.classify.call_args[1]["detections_dict"]
-        first_path = list(det_dict.keys())[0]
-        bbox_sent = det_dict[first_path]["detections"][0]["bbox"]
-        assert bbox_sent == [0.2, 0.3, 0.5, 0.4]
+        bboxes_sent = mock_model.classifier.preprocess.call_args[1]["bboxes"]
+        assert (bboxes_sent[0].xmin, bboxes_sent[0].ymin, bboxes_sent[0].width, bboxes_sent[0].height) == (
+            0.2, 0.3, 0.5, 0.4,
+        )
 
     def test_appearance_id_is_valid_uuid(self, tmp_path):
         dets = [make_det(1)]
 
         def fake_download(bucket, key, local_path):
-            open(local_path, "wb").close()
+            _write_dummy_jpeg(local_path)
 
         mock_s3 = MagicMock()
         mock_s3.download_file.side_effect = fake_download
-        mock_model = MagicMock()
-        mock_model.classify.side_effect = self._mock_classify_fn()
+        mock_model = self._mock_model()
 
         with patch("pipeline.speciesnet._get_model", return_value=mock_model), \
              patch("pipeline.speciesnet.boto3.client", return_value=mock_s3):
             result = classify_species(dets, "t1")
 
         uuid.UUID(result[0].appearance_id)  # lança ValueError se inválido
+
+
+# ── classify_species + geofence (country) ──────────────────────────────────────
+
+
+class TestClassifySpeciesGeofence:
+    """Testa a integração com geofence_animal_classification quando country é passado."""
+
+    DIDELPHIS_VIRGINIANA = (
+        "uuid1;mammalia;didelphimorphia;didelphidae;didelphis;virginiana;virginia opossum"
+    )
+    DIDELPHIS_FAMILY_ROLLUP = (
+        "uuid2;mammalia;didelphimorphia;didelphidae;;;possum family"
+    )
+
+    def _mock_ensemble(self):
+        """Ensemble fake com taxonomy_map/geofence_map mínimos pro rollup de família."""
+        mock_ensemble = MagicMock()
+        mock_ensemble.taxonomy_map = {
+            "mammalia;didelphimorphia;didelphidae;;": self.DIDELPHIS_FAMILY_ROLLUP,
+        }
+        mock_ensemble.geofence_map = {
+            # BRA não está no allow-list -> geofenced quando country="BRA"
+            "mammalia;didelphimorphia;didelphidae;didelphis;virginiana": {
+                "allow": {"USA": []}
+            },
+        }
+        return mock_ensemble
+
+    def _mock_model(self, labels, scores):
+        mock_model = MagicMock()
+        mock_model.classifier.preprocess.return_value = "preprocessed"
+        mock_model.classifier.predict.return_value = {
+            "classifications": {"classes": labels, "scores": scores},
+            "model_version": "speciesnet-v5.0.5",
+        }
+        return mock_model
+
+    def test_geofenced_species_rolls_up_to_family(self, tmp_path):
+        dets = [make_det(1)]
+
+        def fake_download(bucket, key, local_path):
+            _write_dummy_jpeg(local_path)
+
+        mock_s3 = MagicMock()
+        mock_s3.download_file.side_effect = fake_download
+        mock_model = self._mock_model([self.DIDELPHIS_VIRGINIANA], [0.95])
+        mock_ensemble = self._mock_ensemble()
+
+        with patch("pipeline.speciesnet._get_model", return_value=mock_model), \
+             patch("pipeline.speciesnet._get_ensemble", return_value=mock_ensemble) as get_ensemble, \
+             patch("pipeline.speciesnet.boto3.client", return_value=mock_s3):
+            result = classify_species(dets, "t1", country="BRA")
+
+        get_ensemble.assert_called_once()
+        assert result[0].species == "didelphidae"
+        assert result[0].taxonomic_level == "family"
+
+    def test_non_geofenced_species_passes_through(self, tmp_path):
+        """Espécie fora do geofence_map (ex: fauna já plausível pro BR) não é alterada."""
+        dets = [make_det(1)]
+        label = "abc;mammalia;rodentia;dasyproctidae;dasyprocta;leporina;agouti"
+
+        def fake_download(bucket, key, local_path):
+            _write_dummy_jpeg(local_path)
+
+        mock_s3 = MagicMock()
+        mock_s3.download_file.side_effect = fake_download
+        mock_model = self._mock_model([label], [0.9])
+        mock_ensemble = self._mock_ensemble()  # não tem entrada de geofence pra essa espécie
+
+        with patch("pipeline.speciesnet._get_model", return_value=mock_model), \
+             patch("pipeline.speciesnet._get_ensemble", return_value=mock_ensemble), \
+             patch("pipeline.speciesnet.boto3.client", return_value=mock_s3):
+            result = classify_species(dets, "t1", country="BRA")
+
+        assert result[0].species == "dasyprocta leporina"
+        assert result[0].species_score == pytest.approx(0.9)
+
+    def test_no_country_skips_geofence_entirely(self, tmp_path):
+        """Sem country, nem carrega o ensemble — comportamento idêntico ao anterior."""
+        dets = [make_det(1)]
+
+        def fake_download(bucket, key, local_path):
+            _write_dummy_jpeg(local_path)
+
+        mock_s3 = MagicMock()
+        mock_s3.download_file.side_effect = fake_download
+        mock_model = self._mock_model([self.DIDELPHIS_VIRGINIANA], [0.95])
+
+        with patch("pipeline.speciesnet._get_model", return_value=mock_model), \
+             patch("pipeline.speciesnet._get_ensemble") as get_ensemble, \
+             patch("pipeline.speciesnet.boto3.client", return_value=mock_s3):
+            result = classify_species(dets, "t1", country=None)
+
+        get_ensemble.assert_not_called()
+        assert result[0].species == "didelphis virginiana"
 
 
 # ── _frame_index ──────────────────────────────────────────────────────────────
