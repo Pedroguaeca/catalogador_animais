@@ -30,7 +30,7 @@ export default function Home() {
   return (
     <div className="flex flex-col h-screen overflow-hidden">
       <SiabNav />
-      <ReviewPage videos={videos} />
+      <ReviewPage videos={videos} categories={[]} />
     </div>
   );
 }

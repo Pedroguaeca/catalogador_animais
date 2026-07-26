@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { UploadCloud, ClipboardList, Download, BarChart2, LogOut, Film } from "lucide-react";
+import { UploadCloud, ClipboardList, Download, BarChart2, LogOut, Film, ListChecks } from "lucide-react";
 import { useSession, signOut } from "next-auth/react";
 
 // "Anotação" (rota "/") removida do menu — absorvida pelo /review (navegação
@@ -15,10 +15,18 @@ const links = [
   { href: "/export",    label: "Exportar",   icon: Download },
 ];
 
+// Só aparece pra approver/admin (primeiro uso de session.role pra gating de
+// UI — a segurança de verdade é o require_role no backend, isto é só UX).
+const PENDING_SPECIES_LINK = { href: "/especies-pendentes", label: "Espécies Pendentes", icon: ListChecks };
+
 export function SiabNav() {
   const pathname = usePathname();
   const { data: session } = useSession();
   const displayName = session?.user?.name ?? session?.user?.email ?? null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const role = (session as any)?.role as string | undefined;
+  const canApprove = role === "approver" || role === "admin";
+  const visibleLinks = canApprove ? [...links, PENDING_SPECIES_LINK] : links;
 
   return (
     <header
@@ -44,7 +52,7 @@ export function SiabNav() {
       <div style={{ width: 1, height: 22, background: "#E7DECF" }} />
 
       <nav className="flex items-center gap-1">
-        {links.map(({ href, label, icon: Icon }) => {
+        {visibleLinks.map(({ href, label, icon: Icon }) => {
           const active = pathname === href;
           return (
             <Link

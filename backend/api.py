@@ -28,6 +28,7 @@ import io
 import json
 import logging
 import os
+import re
 import urllib.request
 import uuid
 from datetime import datetime, timezone
@@ -36,6 +37,7 @@ from typing import Any, Literal
 
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
+from botocore.exceptions import ClientError
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -53,6 +55,7 @@ REVIEWS_TABLE           = os.environ.get("REVIEWS_TABLE",            "siab-revie
 FRAME_ANNOTATIONS_TABLE = os.environ.get("FRAME_ANNOTATIONS_TABLE",  "siab-frame-annotations")
 CAMERAS_TABLE           = os.environ.get("CAMERAS_TABLE",            "siab-cameras")
 VIDEOS_TABLE            = os.environ.get("VIDEOS_TABLE",             "siab-videos")
+SPECIES_TABLE           = os.environ.get("SPECIES_TABLE",            "siab-species")
 VIDEOS_QUEUE_NAME       = os.environ.get("VIDEOS_QUEUE_NAME",        "siab-videos")
 AWS_REGION              = os.environ.get("AWS_DEFAULT_REGION",       "us-east-1")
 
@@ -119,6 +122,20 @@ def _videos_table():
     return boto3.resource("dynamodb", region_name=AWS_REGION).Table(VIDEOS_TABLE)
 
 
+def _species_table():
+    return boto3.resource("dynamodb", region_name=AWS_REGION).Table(SPECIES_TABLE)
+
+
+def _slugify_species_name(name: str) -> str:
+    """species_id a partir do nome digitado — mesma normalização que o
+    reducer do frontend já faz em ADD_CATEGORY (lowercase, espaços viram
+    hífen), pra manter os dois lados consistentes."""
+    slug = name.strip().lower()
+    slug = re.sub(r"\s+", "-", slug)
+    slug = re.sub(r"[^a-z0-9-]", "", slug)
+    return slug
+
+
 # ── Schemas ────────────────────────────────────────────────────────────────────
 
 
@@ -142,6 +159,15 @@ class AnnotationRequest(BaseModel):
     frame_path:        str
     annotated_species: str
     annotation_source: Literal["ai_confirm", "chip_select", "new_category"]
+
+
+class SpeciesCreateRequest(BaseModel):
+    name: str
+
+
+class SpeciesReviewRequest(BaseModel):
+    decision: Literal["approve", "reject"]
+    reason:   str | None = None
 
 
 class FrameFlagRequest(BaseModel):
@@ -1796,3 +1822,136 @@ def delete_video(
     )
 
     return Response(status_code=204)
+
+
+# ── Endpoint 9 — Catálogo de espécies (fila de aprovação) ────────────────────
+#
+# Catálogo global, compartilhado entre tenants (decisão 25/07) — siab-species
+# não é particionado por tenant_id, ao contrário de todas as outras tabelas.
+# "+ Nova categoria" no /review passa a persistir aqui como status=pending em
+# vez de só existir no estado local do navegador; annotate_frame não muda em
+# nada (annotated_species continua uma string solta, sem vínculo com
+# siab-species) — por isso aprovar/rejeitar depois nunca precisa tocar em
+# frames já confirmados, e o biólogo que propôs já pode usar a categoria no
+# frame que estava revisando sem esperar aprovação (só a visibilidade
+# compartilhada — GET /species — é que é gated por status).
+
+
+@app.post("/species")
+def create_species(
+    body:      SpeciesCreateRequest,
+    tenant_id: str = Depends(get_current_tenant),
+    sub:       str = Depends(get_current_sub),
+):
+    """Propõe uma nova categoria (fica pending até aprovação) — sem gate de
+    role, qualquer analyst autenticado pode propor. Idempotente por slug:
+    nome já pending/official retorna a entrada existente; nome já rejeitado
+    retorna 409 (rejeição não se desfaz reenviando o mesmo nome)."""
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="name não pode ser vazio.")
+    species_id = _slugify_species_name(name)
+    if not species_id:
+        raise HTTPException(status_code=422, detail="name inválido.")
+
+    table = _species_table()
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    item = {
+        "species_id":           species_id,
+        "name":                 name,
+        "status":               "pending",
+        "created_by":           sub,
+        "created_by_tenant_id": tenant_id,
+        "created_at":           now,
+    }
+    try:
+        table.put_item(Item=item, ConditionExpression=Attr("species_id").not_exists())
+        return _clean(item)
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            raise
+        existing = table.get_item(Key={"species_id": species_id}).get("Item")
+        if existing and existing.get("status") == "rejected":
+            raise HTTPException(
+                status_code=409,
+                detail=f"'{name}' já foi avaliado e rejeitado anteriormente.",
+            )
+        return _clean(existing) if existing else item
+
+
+@app.get("/species")
+def list_species():
+    """Lista categorias oficiais (aprovadas) — alimenta o autocomplete geral
+    do /review. Sem autenticação (decisão 25/07: fica público)."""
+    table = _species_table()
+    items: list[dict] = []
+    kwargs: dict = {
+        "IndexName": "by-status",
+        "KeyConditionExpression": Key("status").eq("official"),
+    }
+    while True:
+        resp = table.query(**kwargs)
+        items.extend(resp.get("Items", []))
+        lek = resp.get("LastEvaluatedKey")
+        if not lek:
+            break
+        kwargs["ExclusiveStartKey"] = lek
+    items.sort(key=lambda x: x.get("name", "").lower())
+    return {"count": len(items), "species": [_clean(it) for it in items]}
+
+
+@app.get("/species/pending", dependencies=[Depends(require_role("approver", "admin"))])
+def list_pending_species():
+    """Fila de aprovação — categorias propostas aguardando decisão."""
+    table = _species_table()
+    items: list[dict] = []
+    kwargs: dict = {
+        "IndexName": "by-status",
+        "KeyConditionExpression": Key("status").eq("pending"),
+    }
+    while True:
+        resp = table.query(**kwargs)
+        items.extend(resp.get("Items", []))
+        lek = resp.get("LastEvaluatedKey")
+        if not lek:
+            break
+        kwargs["ExclusiveStartKey"] = lek
+    items.sort(key=lambda x: x.get("created_at", ""))
+    return {"count": len(items), "species": [_clean(it) for it in items]}
+
+
+@app.patch("/species/{species_id}/review", dependencies=[Depends(require_role("approver", "admin"))])
+def review_species(
+    species_id: str,
+    body:       SpeciesReviewRequest,
+    sub:        str = Depends(get_current_sub),
+):
+    """Aprova (→ official, entra no autocomplete geral) ou rejeita (→
+    rejected, sai da fila permanentemente) uma categoria pending. Não toca
+    em siab-frame-annotations — frames já anotados com esse texto continuam
+    exatamente como estão, aprovado ou não."""
+    table = _species_table()
+    item = table.get_item(Key={"species_id": species_id}).get("Item")
+    if not item:
+        raise HTTPException(status_code=404, detail="Categoria não encontrada.")
+    if item.get("status") != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Categoria já está '{item.get('status')}' — não pode revisar de novo.",
+        )
+
+    new_status = "official" if body.decision == "approve" else "rejected"
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    update_expr = "SET #st = :st, reviewed_by = :rb, reviewed_at = :ra"
+    expr_vals: dict = {":st": new_status, ":rb": sub, ":ra": now}
+    if body.reason:
+        update_expr += ", rejection_reason = :rr"
+        expr_vals[":rr"] = body.reason
+
+    table.update_item(
+        Key={"species_id": species_id},
+        UpdateExpression=update_expr,
+        ExpressionAttributeNames={"#st": "status"},
+        ExpressionAttributeValues=expr_vals,
+    )
+    return {"species_id": species_id, "status": new_status}

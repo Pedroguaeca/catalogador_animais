@@ -17,6 +17,7 @@ from aws_cdk import (
     aws_apigatewayv2_authorizers as apigwv2_auth,
     aws_cognito as cognito,
     aws_secretsmanager as secretsmanager,
+    custom_resources as cr,
 )
 from constructs import Construct
 
@@ -29,6 +30,33 @@ class InfraStack(Stack):
         # ── S3 — importa bucket existente ────────────────────────────────────
         media_bucket = s3.Bucket.from_bucket_name(
             self, "SiabMediaBucket", "siab-media-dev"
+        )
+
+        # CORS gerido via custom resource porque o bucket é importado (não criado pelo CDK).
+        # Permite PUT directo do browser para o presigned URL sem passar pela API Gateway.
+        _cors_rule = {
+            "AllowedOrigins": ["https://*.vercel.app", "http://localhost:3000"],
+            "AllowedMethods": ["GET", "PUT", "HEAD"],
+            "AllowedHeaders": ["*"],
+            "ExposeHeaders":  ["ETag"],
+            "MaxAgeSeconds":  3000,
+        }
+        _cors_call = cr.AwsSdkCall(
+            service="S3",
+            action="putBucketCors",
+            parameters={
+                "Bucket": "siab-media-dev",
+                "CORSConfiguration": {"CORSRules": [_cors_rule]},
+            },
+            physical_resource_id=cr.PhysicalResourceId.of("siab-media-dev-cors"),
+        )
+        cr.AwsCustomResource(
+            self, "MediaBucketCors",
+            on_create=_cors_call,
+            on_update=_cors_call,
+            policy=cr.AwsCustomResourcePolicy.from_sdk_calls(
+                resources=[f"arn:aws:s3:::siab-media-dev"],
+            ),
         )
 
         # ── DynamoDB — configuração base ──────────────────────────────────────
@@ -92,8 +120,8 @@ class InfraStack(Stack):
         frame_annotations = ddb.Table(
             self, "SiabFrameAnnotations",
             table_name="siab-frame-annotations",
-            partition_key=ddb.Attribute(name="tenant_id",             type=ddb.AttributeType.STRING),
-            sort_key=    ddb.Attribute(name="appearance_id#frame_idx", type=ddb.AttributeType.STRING),
+            partition_key=ddb.Attribute(name="tenant_id",         type=ddb.AttributeType.STRING),
+            sort_key=    ddb.Attribute(name="video_id#frame_idx", type=ddb.AttributeType.STRING),
             **_common,
         )
 
@@ -102,6 +130,11 @@ class InfraStack(Stack):
             table_name="siab-species",
             partition_key=ddb.Attribute(name="species_id", type=ddb.AttributeType.STRING),
             **_common,
+        )
+        species.add_global_secondary_index(
+            index_name="by-status",
+            partition_key=ddb.Attribute(name="status", type=ddb.AttributeType.STRING),
+            projection_type=ddb.ProjectionType.ALL,
         )
 
         invites = ddb.Table(
@@ -179,11 +212,13 @@ class InfraStack(Stack):
                 file="Dockerfile.ingester",
             ),
             architecture=_lambda.Architecture.ARM_64,
-            memory_size=512,
+            memory_size=1024,
             timeout=_lambda_timeout,
             environment={
                 "SIAB_BUCKET":      "siab-media-dev",
                 "FRAMES_QUEUE_URL": frames_queue.queue_url,
+                "CAMERAS_TABLE":    cameras.table_name,
+                "VIDEOS_TABLE":     videos_table.table_name,
             },
         )
 
@@ -204,6 +239,7 @@ class InfraStack(Stack):
                 "DETECTIONS_QUEUE_URL": detections_queue.queue_url,
                 "MD_CACHE_DIR":         "/tmp/models",
                 "MD_THRESHOLD":         "0.1",
+                "VIDEOS_TABLE":         videos_table.table_name,
             },
         )
 
@@ -227,25 +263,32 @@ class InfraStack(Stack):
                 "SN_MODEL":            "/tmp/models/speciesnet/v4.0.3a",
                 "SN_MODEL_S3_PREFIX":  "models/speciesnet/v4.0.3a",
                 "SN_MODEL_LOCAL_DIR":  "/tmp/models/speciesnet/v4.0.3a",
-                "SN_MODEL_VERSION":    "speciesnet-v5.0.5",
+                "SN_MODEL_VERSION":         "speciesnet-v5.0.5",
+                "FRAME_ANNOTATIONS_TABLE": frame_annotations.table_name,
             },
         )
 
         # ── IAM — Ingester ───────────────────────────────────────────────────
         # Lê vídeos do S3 + escreve frames no S3 + envia para frames_queue
+        # + escreve câmeras no DynamoDB (OCR migrado para cá)
         media_bucket.grant_read(ingester_fn)
         media_bucket.grant_put(ingester_fn)
         frames_queue.grant_send_messages(ingester_fn)
+        cameras.grant_read_write_data(ingester_fn)
+        videos_table.grant_read_write_data(ingester_fn)
 
         # ── IAM — MegaDetector ───────────────────────────────────────────────
         # Lê frames do S3 + lê modelo do S3 + envia para detections_queue
+        # + incrementa frames_processed_count em siab-videos (ADD atômico)
         media_bucket.grant_read(megadetector_fn)
         detections_queue.grant_send_messages(megadetector_fn)
+        videos_table.grant_write_data(megadetector_fn)
 
         # ── IAM — SpeciesNet ─────────────────────────────────────────────────
-        # Lê frames do S3 + escreve Aparições no DynamoDB
+        # Lê frames do S3 + escreve Aparições + anotações de frame no DynamoDB
         media_bucket.grant_read(speciesnet_fn)
         appearances.grant_write_data(speciesnet_fn)
+        frame_annotations.grant_write_data(speciesnet_fn)
 
         # ── Event Source Mappings (SQS → Lambda) ─────────────────────────────
         ingester_fn.add_event_source(
@@ -288,6 +331,8 @@ class InfraStack(Stack):
                 "FRAME_ANNOTATIONS_TABLE":  frame_annotations.table_name,
                 "VIDEOS_QUEUE_NAME":        videos_queue.queue_name,
                 "INVITES_TABLE":            invites.table_name,
+                "VIDEOS_TABLE":             videos_table.table_name,
+                "SPECIES_TABLE":            species.table_name,
             },
         )
 
@@ -455,6 +500,9 @@ class InfraStack(Stack):
                 ],
                 allow_methods=[apigwv2.CorsHttpMethod.ANY],
                 allow_headers=["*"],
+                # Sem isso, Content-Disposition não chega ao JS do browser em
+                # respostas cross-origin — quebra a extração do nome do CSV.
+                expose_headers=["Content-Disposition"],
             ),
         )
         http_api.add_routes(

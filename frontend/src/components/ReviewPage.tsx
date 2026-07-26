@@ -2,7 +2,7 @@
 
 import { useReducer, useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { reviewReducer, initialState } from "../lib/reducer";
-import type { Video, Frame, VideoSegment } from "../lib/types";
+import type { Video, Frame, VideoSegment, Category } from "../lib/types";
 import { TopBar } from "./TopBar";
 import { FrameStage } from "./FrameStage";
 import { Filmstrip } from "./Filmstrip";
@@ -39,6 +39,7 @@ interface ReviewPageProps {
   videos: Video[];
   initialVideoId?: string;
   projectId?: string;
+  categories: Category[];
 }
 
 function confirmAllVideoOnServer(projectId: string, videoId: string, idToken?: string) {
@@ -70,6 +71,20 @@ function persistFrameIndividualCount(videoId: string, framePath: string, value: 
     method: "PATCH",
     headers: apiHeaders(idToken, { "Content-Type": "application/json" }),
     body: JSON.stringify({ video_id: videoId, frame_path: framePath, value }),
+  }).catch(() => {});
+}
+
+// Propõe uma categoria nova pro catálogo compartilhado (siab-species) — fica
+// pending até um approver/admin revisar em /especies-pendentes. Fire-and-
+// forget, mesmo padrão non-blocking dos outros PATCH de frame: o chip já foi
+// adicionado localmente (ADD_CATEGORY) e o frame já foi anotado, então não
+// há nada pra esperar aqui.
+function persistSpeciesProposal(name: string, idToken?: string) {
+  if (!name.trim()) return;
+  fetch(`${API_BASE}/species`, {
+    method: "POST",
+    headers: apiHeaders(idToken, { "Content-Type": "application/json" }),
+    body: JSON.stringify({ name }),
   }).catch(() => {});
 }
 
@@ -228,7 +243,7 @@ function computeSegments(
   return { segments, segmentKeyByFramePath };
 }
 
-export function ReviewPage({ videos, initialVideoId, projectId }: ReviewPageProps) {
+export function ReviewPage({ videos, initialVideoId, projectId, categories }: ReviewPageProps) {
   const { data: session } = useSession();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const idToken = (session as any)?.idToken as string | undefined;
@@ -238,7 +253,7 @@ export function ReviewPage({ videos, initialVideoId, projectId }: ReviewPageProp
     : videos[0]?.id ?? "";
   const [state, dispatch] = useReducer(
     reviewReducer,
-    initialState(firstVideoId, videos.find((v) => v.id === firstVideoId)?.frames ?? [])
+    initialState(firstVideoId, videos.find((v) => v.id === firstVideoId)?.frames ?? [], categories)
   );
   const [zoom, setZoom] = useState(false);
 
@@ -481,6 +496,7 @@ export function ReviewPage({ videos, initialVideoId, projectId }: ReviewPageProp
             if (frame?.path) {
               persistFrameAnnotation(state.videoId, frame.path, name, "new_category", idToken);
             }
+            persistSpeciesProposal(name, idToken);
           }}
           novoEventoMarked={novoEventoMarked}
           onMarkNovoEvento={() => {

@@ -34,22 +34,11 @@ function preAnnotatedSource(frames: Frame[]): Record<number, string> {
   return map;
 }
 
-export const DEFAULT_CATEGORIES: Category[] = [
-  { id: "aramides",     name: "Aramides" },
-  { id: "crypturellus", name: "Crypturellus" },
-  { id: "cutia",        name: "Cutia" },
-  { id: "dasyprocta",   name: "Dasyprocta" },
-  { id: "irara",        name: "Irara" },
-  { id: "macuco",       name: "Macuco" },
-  { id: "pecari",       name: "Cateto" },
-  { id: "teiu",         name: "Teiú" },
-  { id: "tinamus",      name: "Tinamus" },
-  { id: "paca",         name: "Paca" },
-  { id: "quati",        name: "Quati" },
-  { id: "anta",         name: "Anta" },
-];
-
-export const initialState = (videoId: string, frames: Frame[]): ReviewState => {
+// Categorias vêm de GET /species (status=official) — carregadas antes do
+// useReducer montar (ReviewPageDataLoader) e passadas aqui. Substituiu a
+// lista hardcoded de 12 itens (migrada como seed pra siab-species, task
+// "Catálogo de espécies validado + busca via GBIF", 25/07).
+export const initialState = (videoId: string, frames: Frame[], categories: Category[]): ReviewState => {
   const annotatedFrames = preAnnotatedIndices(frames);
   return {
     query: "",
@@ -60,7 +49,7 @@ export const initialState = (videoId: string, frames: Frame[]): ReviewState => {
     annotated: annotatedFrames.size,
     frameIdx: 1,
     videoId,
-    categories: DEFAULT_CATEGORIES,
+    categories,
     annotatedFrames,
     annotatedSpecies: preAnnotatedSpecies(frames),
     annotatedAt: preAnnotatedAt(frames),

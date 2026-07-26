@@ -1386,5 +1386,148 @@ class TestExportNivelTaxonomico(unittest.TestCase):
         self.assertEqual(values["mammalia"], "class")
 
 
+class _FakeSpeciesTable:
+    """Dublê de siab-species — boto3 Table real seria overkill aqui; simula
+    get_item/put_item (com ConditionExpression not_exists)/update_item/query
+    (GSI by-status) o suficiente pra exercitar os 4 endpoints novos."""
+
+    def __init__(self):
+        self._store: dict[str, dict] = {}
+
+    def get_item(self, Key):
+        item = self._store.get(Key["species_id"])
+        return {"Item": item} if item else {}
+
+    def put_item(self, Item, ConditionExpression=None):
+        species_id = Item["species_id"]
+        if ConditionExpression is not None and species_id in self._store:
+            from botocore.exceptions import ClientError
+            raise ClientError(
+                {"Error": {"Code": "ConditionalCheckFailedException", "Message": "exists"}},
+                "PutItem",
+            )
+        self._store[species_id] = dict(Item)
+
+    def update_item(self, Key, UpdateExpression, ExpressionAttributeNames, ExpressionAttributeValues):
+        item = self._store[Key["species_id"]]
+        # SET #st = :st, reviewed_by = :rb, reviewed_at = :ra[, rejection_reason = :rr]
+        item[ExpressionAttributeNames["#st"]] = ExpressionAttributeValues[":st"]
+        item["reviewed_by"] = ExpressionAttributeValues[":rb"]
+        item["reviewed_at"] = ExpressionAttributeValues[":ra"]
+        if ":rr" in ExpressionAttributeValues:
+            item["rejection_reason"] = ExpressionAttributeValues[":rr"]
+
+    def query(self, IndexName, KeyConditionExpression, ExclusiveStartKey=None):
+        assert IndexName == "by-status"
+        attr_name = KeyConditionExpression._values[0].name
+        target = KeyConditionExpression._values[1]
+        items = [it for it in self._store.values() if it.get(attr_name) == target]
+        return {"Items": items}
+
+
+class TestSpeciesCatalog(unittest.TestCase):
+    """POST /species, GET /species, GET /species/pending, PATCH
+    /species/{id}/review — catálogo global de espécies com fila de
+    aprovação (task 25/07). Primeiro uso real de require_role."""
+
+    def setUp(self):
+        self.table = _FakeSpeciesTable()
+        self.patcher = patch("backend.api._species_table", return_value=self.table)
+        self.patcher.start()
+        self.analyst_headers = {"Authorization": f"Bearer {_make_test_jwt(role='analyst')}"}
+        self.approver_headers = {"Authorization": f"Bearer {_make_test_jwt(role='approver')}"}
+
+    def tearDown(self):
+        self.patcher.stop()
+
+    def test_create_species_defaults_to_pending(self):
+        resp = client.post("/species", json={"name": "Jaguatirica"}, headers=self.analyst_headers)
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["species_id"], "jaguatirica")
+        self.assertEqual(body["status"], "pending")
+        self.assertEqual(body["created_by_tenant_id"], TENANT_ID)
+
+    def test_create_species_idempotent_by_slug(self):
+        client.post("/species", json={"name": "Jaguatirica"}, headers=self.analyst_headers)
+        resp = client.post("/species", json={"name": "jaguatirica"}, headers=self.analyst_headers)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(self.table._store), 1)
+
+    def test_create_species_blocked_after_rejection(self):
+        self.table._store["jaguatirica"] = {
+            "species_id": "jaguatirica", "name": "Jaguatirica", "status": "rejected",
+        }
+        resp = client.post("/species", json={"name": "Jaguatirica"}, headers=self.analyst_headers)
+        self.assertEqual(resp.status_code, 409)
+
+    def test_create_species_empty_name_422(self):
+        resp = client.post("/species", json={"name": "   "}, headers=self.analyst_headers)
+        self.assertEqual(resp.status_code, 422)
+
+    def test_list_species_only_returns_official(self):
+        self.table._store["paca"] = {"species_id": "paca", "name": "Paca", "status": "official"}
+        self.table._store["novaespecie"] = {"species_id": "novaespecie", "name": "Nova Espécie", "status": "pending"}
+        resp = client.get("/species")
+        self.assertEqual(resp.status_code, 200)
+        names = [s["name"] for s in resp.json()["species"]]
+        self.assertEqual(names, ["Paca"])
+
+    def test_list_species_is_public_no_auth_header(self):
+        self.table._store["paca"] = {"species_id": "paca", "name": "Paca", "status": "official"}
+        c = TestClient(app)  # sem Authorization nenhum
+        resp = c.get("/species")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_pending_queue_blocked_for_analyst(self):
+        resp = client.get("/species/pending", headers=self.analyst_headers)
+        self.assertEqual(resp.status_code, 403)
+
+    def test_pending_queue_allowed_for_approver(self):
+        self.table._store["novaespecie"] = {"species_id": "novaespecie", "name": "Nova Espécie", "status": "pending"}
+        resp = client.get("/species/pending", headers=self.approver_headers)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["count"], 1)
+
+    def test_review_blocked_for_analyst(self):
+        self.table._store["x"] = {"species_id": "x", "name": "X", "status": "pending"}
+        resp = client.patch("/species/x/review", json={"decision": "approve"}, headers=self.analyst_headers)
+        self.assertEqual(resp.status_code, 403)
+
+    def test_approve_moves_to_official_and_appears_in_list(self):
+        self.table._store["jaguatirica"] = {
+            "species_id": "jaguatirica", "name": "Jaguatirica", "status": "pending",
+        }
+        resp = client.patch("/species/jaguatirica/review", json={"decision": "approve"}, headers=self.approver_headers)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["status"], "official")
+
+        listed = client.get("/species").json()["species"]
+        self.assertEqual([s["name"] for s in listed], ["Jaguatirica"])
+
+    def test_reject_sets_reason_and_removes_from_pending(self):
+        self.table._store["x"] = {"species_id": "x", "name": "X", "status": "pending"}
+        resp = client.patch(
+            "/species/x/review",
+            json={"decision": "reject", "reason": "não é espécie válida"},
+            headers=self.approver_headers,
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.table._store["x"]["status"], "rejected")
+        self.assertEqual(self.table._store["x"]["rejection_reason"], "não é espécie válida")
+
+        pending = client.get("/species/pending", headers=self.approver_headers).json()["species"]
+        self.assertEqual(pending, [])
+
+    def test_review_nonexistent_404(self):
+        resp = client.patch("/species/inexistente/review", json={"decision": "approve"}, headers=self.approver_headers)
+        self.assertEqual(resp.status_code, 404)
+
+    def test_review_already_decided_409(self):
+        self.table._store["x"] = {"species_id": "x", "name": "X", "status": "official"}
+        resp = client.patch("/species/x/review", json={"decision": "approve"}, headers=self.approver_headers)
+        self.assertEqual(resp.status_code, 409)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -7,7 +7,7 @@ import { Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
 import { SiabNav } from "../../src/components/SiabNav";
 import { ReviewPage } from "../../src/components/ReviewPage";
 import { API_BASE, apiHeaders } from "../../src/lib/api";
-import type { Video, Frame } from "../../src/lib/types";
+import type { Video, Frame, Category } from "../../src/lib/types";
 
 const PROJECT_ID = "projeto-junho-2026";
 
@@ -15,6 +15,11 @@ interface ApiVideoItem {
   video_id:          string;
   original_filename: string | null;
   display_status:    string;
+}
+
+interface ApiSpeciesItem {
+  species_id: string;
+  name:       string;
 }
 
 interface ApiFrameItem {
@@ -73,8 +78,9 @@ function ReviewPageDataLoader() {
   const searchParams = useSearchParams();
   const initialVideoId = searchParams.get("video") ?? undefined;
 
-  const [videos,  setVideos]  = useState<Video[] | null>(null);
-  const [error,   setError]   = useState<string | null>(null);
+  const [videos,     setVideos]     = useState<Video[] | null>(null);
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [error,      setError]      = useState<string | null>(null);
 
   useEffect(() => {
     if (!idToken) return;
@@ -115,6 +121,21 @@ function ReviewPageDataLoader() {
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : "Erro ao carregar dados");
       }
+
+      // GET /species é público (sem gate) — falha aqui não deve travar o
+      // carregamento dos vídeos, só deixa o autocomplete vazio.
+      try {
+        const speciesRes = await fetch(`${API_BASE}/species`);
+        if (speciesRes.ok) {
+          const speciesData = await speciesRes.json();
+          const items: ApiSpeciesItem[] = speciesData.species ?? [];
+          if (!cancelled) {
+            setCategories(items.map((s) => ({ id: s.species_id, name: s.name })));
+          }
+        }
+      } catch {
+        // silencioso — autocomplete fica vazio, "+ Nova categoria" continua funcionando
+      }
     })();
 
     return () => { cancelled = true; };
@@ -146,7 +167,7 @@ function ReviewPageDataLoader() {
     );
   }
 
-  return <ReviewPage videos={videos} initialVideoId={initialVideoId} projectId={PROJECT_ID} />;
+  return <ReviewPage videos={videos} initialVideoId={initialVideoId} projectId={PROJECT_ID} categories={categories} />;
 }
 
 export default function Review() {
