@@ -5,6 +5,7 @@ export interface Detection {
   cls_conf: number;
   bbox: [number, number, number, number]; // x1 y1 x2 y2 (pixel-space) — ou x,y,w,h normalizado 0-1 se bboxNormalized
   bboxNormalized?: boolean; // true para dados vindos do pipeline AWS (MegaDetector, 0-1)
+  geoReviewFlag?: boolean; // sem ocorrência confirmada no Brasil via GBIF (SIAB-187) — sinalização, não bloqueio
 }
 
 export interface Frame {

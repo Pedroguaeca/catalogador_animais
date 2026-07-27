@@ -386,6 +386,72 @@ class TestClassifySpeciesGeofence:
         assert result[0].species == "didelphis virginiana"
 
 
+class TestClassifySpeciesGbifAllowlist:
+    """Entrega (b) do geofencing (SIAB-187): camada GBIF depois do geofence
+    embutido. Só sinaliza (geo_review_flag) — nunca troca species/score."""
+
+    def _mock_model(self, label, score):
+        mock_model = MagicMock()
+        mock_model.classifier.preprocess.return_value = "preprocessed"
+        mock_model.classifier.predict.return_value = {
+            "classifications": {"classes": [label], "scores": [score]},
+            "model_version": "speciesnet-v5.0.5",
+        }
+        return mock_model
+
+    def _run(self, label, score, country, allowlist, tmp_path):
+        dets = [make_det(1)]
+
+        def fake_download(bucket, key, local_path):
+            _write_dummy_jpeg(local_path)
+
+        mock_s3 = MagicMock()
+        mock_s3.download_file.side_effect = fake_download
+        mock_model = self._mock_model(label, score)
+        mock_ensemble = MagicMock(taxonomy_map={}, geofence_map={})
+
+        with patch("pipeline.speciesnet._get_model", return_value=mock_model), \
+             patch("pipeline.speciesnet._get_ensemble", return_value=mock_ensemble), \
+             patch("pipeline.speciesnet._get_gbif_allowlist", return_value=allowlist) as get_allowlist, \
+             patch("pipeline.speciesnet.boto3.client", return_value=mock_s3):
+            result = classify_species(dets, "t1", country=country)
+        return result, get_allowlist
+
+    # penelope purpurascens: caso real que motivou a task — geofence embutido
+    # do Google marca como permitido no BR, GBIF não tem registro de ocorrência.
+    PENELOPE = "uuid;aves;galliformes;cracidae;penelope;purpurascens;crested guan"
+
+    def test_species_absent_from_allowlist_gets_flagged(self, tmp_path):
+        """Espécie nunca sincronizada (ausente do cache) — default seguro é flag=True."""
+        result, _ = self._run(self.PENELOPE, 0.9, "BRA", allowlist={}, tmp_path=tmp_path)
+        assert result[0].species == "penelope purpurascens"
+        assert result[0].geo_review_flag is True
+
+    def test_species_with_no_br_occurrence_gets_flagged(self, tmp_path):
+        allowlist = {"penelope purpurascens": {"ocorre_br": False, "n_registros_gbif": 0}}
+        result, _ = self._run(self.PENELOPE, 0.9, "BRA", allowlist=allowlist, tmp_path=tmp_path)
+        assert result[0].geo_review_flag is True
+
+    def test_species_with_br_occurrence_not_flagged(self, tmp_path):
+        allowlist = {"penelope purpurascens": {"ocorre_br": True, "n_registros_gbif": 500}}
+        result, _ = self._run(self.PENELOPE, 0.9, "BRA", allowlist=allowlist, tmp_path=tmp_path)
+        assert result[0].geo_review_flag is False
+
+    def test_non_species_rollup_never_flagged(self, tmp_path):
+        """Rollup pra gênero/família (já resolvido pelo geofence embutido) não
+        passa pela checagem GBIF — level != "species"."""
+        family_rollup = "uuid;aves;galliformes;cracidae;;;guans"
+        result, get_allowlist = self._run(family_rollup, 0.9, "BRA", allowlist={}, tmp_path=tmp_path)
+        assert result[0].taxonomic_level == "family"
+        assert result[0].geo_review_flag is False
+        get_allowlist.assert_not_called()
+
+    def test_no_country_skips_gbif_check_entirely(self, tmp_path):
+        result, get_allowlist = self._run(self.PENELOPE, 0.9, None, allowlist={}, tmp_path=tmp_path)
+        assert result[0].geo_review_flag is False
+        get_allowlist.assert_not_called()
+
+
 # ── _frame_index ──────────────────────────────────────────────────────────────
 
 
@@ -606,7 +672,7 @@ class _FakeFrameAnnotationsTable:
             item[attr] = ExpressionAttributeValues[placeholder]
 
 
-def make_frame_cls(species="didelphidae", score=0.99, level="family", tenant="t1", video="v1", frame_num=1):
+def make_frame_cls(species="didelphidae", score=0.99, level="family", tenant="t1", video="v1", frame_num=1, geo_review_flag=False):
     return Classification(
         appearance_id=str(uuid.uuid4()),
         frame_s3_key=f"{tenant}/frames/{video}/frame_{frame_num:05d}.jpg",
@@ -617,6 +683,7 @@ def make_frame_cls(species="didelphidae", score=0.99, level="family", tenant="t1
         camera_id=None,
         bbox=(0.1, 0.2, 0.3, 0.4),
         model_version="speciesnet-v5.0.5",
+        geo_review_flag=geo_review_flag,
     )
 
 
@@ -679,3 +746,14 @@ class TestWriteFrameAnnotations:
         with patch("pipeline.speciesnet_handler._frame_anns", fake_table):
             _write_frame_annotations([cls], tenant_id="t1", video_id="v1")
         assert ("t1", "v1#00003") in fake_table.items
+
+    def test_geo_review_flag_is_persisted(self):
+        """Entrega (b) do geofencing (SIAB-187): geo_review_flag grava junto
+        dos outros campos de IA, sem tocar nos campos humanos (mesma garantia
+        de update_item já coberta acima)."""
+        fake_table = _FakeFrameAnnotationsTable()
+        cls = make_frame_cls(species="penelope purpurascens", level="species", frame_num=4, geo_review_flag=True)
+        with patch("pipeline.speciesnet_handler._frame_anns", fake_table):
+            _write_frame_annotations([cls], tenant_id="t1", video_id="v1")
+        item = fake_table.items[("t1", "v1#00004")]
+        assert item["geo_review_flag"] is True

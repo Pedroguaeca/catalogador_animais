@@ -10,6 +10,7 @@ Fluxo:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -29,12 +30,16 @@ BUCKET_NAME       = os.environ.get("SIAB_BUCKET", "siab-media-dev")
 MODEL_NAME        = os.environ.get("SN_MODEL", "/tmp/models/speciesnet/v4.0.3a")
 MODEL_S3_PREFIX   = os.environ.get("SN_MODEL_S3_PREFIX", "models/speciesnet/v4.0.3a")
 MODEL_LOCAL_DIR   = os.environ.get("SN_MODEL_LOCAL_DIR", "/tmp/models/speciesnet/v4.0.3a")
+GBIF_ALLOWLIST_S3_KEY = os.environ.get("GBIF_ALLOWLIST_S3_KEY", "models/gbif/br_allowlist.json")
 
 # Cache em memória: model_name → objeto SpeciesNet carregado
 _model_cache: dict[str, Any] = {}
 
 # Cache em memória: model_name → SpeciesNetEnsemble (taxonomy_map + geofence_map)
 _ensemble_cache: dict[str, Any] = {}
+
+# Cache em memória: "bucket/key" → allowlist GBIF já carregada (dict espécie → {ocorre_br, ...})
+_gbif_allowlist_cache: dict[str, dict] = {}
 
 # Arquivos esperados no diretório do modelo (info.json é o sentinel de cache)
 _MODEL_FILES = [
@@ -95,6 +100,10 @@ class Classification:
         camera_id:        ID da câmera (None no MVP).
         bbox:             Bounding box normalizada (x, y, w, h) herdada da detecção.
         model_version:    Versão do SpeciesNet que gerou a classificação.
+        geo_review_flag:  True se a espécie (nível "species") não tem ocorrência
+                          confirmada no Brasil segundo a allowlist GBIF — sinaliza
+                          pra revisão humana, nunca bloqueia/troca a espécie
+                          (entrega (b) do geofencing, SIAB-187).
     """
 
     appearance_id: str
@@ -106,6 +115,7 @@ class Classification:
     camera_id: str | None
     bbox: tuple[float, float, float, float]
     model_version: str = ""
+    geo_review_flag: bool = False
 
 
 # ── Parsing de label ──────────────────────────────────────────────────────────
@@ -187,6 +197,29 @@ def _get_ensemble(model_name: str):
         _ensemble_cache[model_name] = SpeciesNetEnsemble(model_name, geofence=True)
         logger.info("SpeciesNetEnsemble carregado.")
     return _ensemble_cache[model_name]
+
+
+def _get_gbif_allowlist(bucket: str, s3_client=None) -> dict:
+    """Carrega a allowlist geográfica GBIF (br_allowlist.json, produzida por
+    pipeline/gbif_allowlist_sync.py), cacheando entre invocações quentes.
+
+    Ausência do arquivo (sync ainda não rodou) ou de uma espécie específica
+    dentro dele não interrompe a classificação — o chamador trata "sem dado"
+    como "precisa revisão" (default seguro, ver classify_species).
+    """
+    cache_key = f"{bucket}/{GBIF_ALLOWLIST_S3_KEY}"
+    if cache_key not in _gbif_allowlist_cache:
+        s3 = s3_client or boto3.client("s3")
+        try:
+            obj = s3.get_object(Bucket=bucket, Key=GBIF_ALLOWLIST_S3_KEY)
+            _gbif_allowlist_cache[cache_key] = json.loads(obj["Body"].read())
+        except Exception as exc:
+            logger.warning(
+                "Allowlist GBIF indisponível (%s) — geo_review_flag será True "
+                "pra toda espécie até o próximo sync.", exc,
+            )
+            _gbif_allowlist_cache[cache_key] = {}
+    return _gbif_allowlist_cache[cache_key]
 
 
 # ── Função principal ──────────────────────────────────────────────────────────
@@ -301,6 +334,17 @@ def classify_species(
 
             species, level, tax_path = _parse_label(label)
 
+            # Camada GBIF (entrega (b), SIAB-187): só sinaliza, nunca troca a
+            # espécie — geofence embutido já rodou acima. Só se aplica a
+            # classificações no nível "species" (rollups pra gênero/família já
+            # foram resolvidos pelo geofence embutido, não precisam de segunda
+            # checagem).
+            geo_review_flag = False
+            if country and level == "species":
+                allowlist = _get_gbif_allowlist(bucket, s3_client=s3)
+                entry = allowlist.get(species)
+                geo_review_flag = entry is None or not entry.get("ocorre_br", False)
+
             classifications.append(Classification(
                 appearance_id=str(uuid.uuid4()),
                 frame_s3_key=det.frame_s3_key,
@@ -311,6 +355,7 @@ def classify_species(
                 camera_id=None,
                 bbox=det.bbox,
                 model_version=pred.get("model_version", ""),
+                geo_review_flag=geo_review_flag,
             ))
 
         logger.info(

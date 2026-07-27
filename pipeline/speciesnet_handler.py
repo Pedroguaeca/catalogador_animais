@@ -210,7 +210,8 @@ def _write_frame_annotations(
                 "SET video_id = :video_id, frame_idx = :frame_idx, "
                 "frame_s3_key = :frame_s3_key, ai_species = :ai_species, "
                 "ai_score = :ai_score, bbox = :bbox, "
-                "taxonomic_level = :taxonomic_level"
+                "taxonomic_level = :taxonomic_level, "
+                "geo_review_flag = :geo_review_flag"
             ),
             ExpressionAttributeValues={
                 ":video_id":       video_id,
@@ -220,6 +221,7 @@ def _write_frame_annotations(
                 ":ai_score":       Decimal(str(round(c.species_score, 4))),
                 ":bbox":           [Decimal(str(round(v, 4))) for v in c.bbox],
                 ":taxonomic_level": taxonomic_level,
+                ":geo_review_flag": c.geo_review_flag,
             },
         )
 

@@ -556,6 +556,39 @@ class InfraStack(Stack):
             events_targets.LambdaFunction(consolidator_fn)
         )
 
+        # ── Lambda — GBIF Allowlist Sync (Python puro, sem ML) ────────────────
+        # Entrega (b) do geofencing (SIAB-187): escaneia siab-frame-annotations
+        # pelas espécies que o SIAB já classificou de verdade (~25 hoje, não as
+        # 2064 da taxonomia global do SpeciesNet — não caberia em 15 min) e
+        # consulta o GBIF só pras novas desde o último sync. Grava
+        # models/gbif/br_allowlist.json no bucket de mídia; consumido por
+        # pipeline/speciesnet.py (_get_gbif_allowlist).
+        gbif_allowlist_sync_fn = _lambda.Function(
+            self, "GbifAllowlistSyncFn",
+            function_name="siab-gbif-allowlist-sync",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            handler="handler.lambda_handler",
+            code=_lambda.Code.from_asset("lambda/gbif_allowlist_sync"),
+            timeout=Duration.minutes(15),
+            memory_size=256,
+            environment={
+                "FRAME_ANNOTATIONS_TABLE": frame_annotations.table_name,
+                "SIAB_BUCKET":             media_bucket.bucket_name,
+            },
+        )
+        frame_annotations.grant_read_data(gbif_allowlist_sync_fn)
+        media_bucket.grant_read_write(gbif_allowlist_sync_fn)
+
+        # EventBridge Schedule: dispara uma vez por mês (dia 1, meia-noite UTC)
+        gbif_allowlist_sync_rule = events.Rule(
+            self, "GbifAllowlistSyncSchedule",
+            rule_name="siab-gbif-allowlist-sync-schedule",
+            schedule=events.Schedule.cron(minute="0", hour="0", day="1"),
+        )
+        gbif_allowlist_sync_rule.add_target(
+            events_targets.LambdaFunction(gbif_allowlist_sync_fn)
+        )
+
         # ── Outputs ───────────────────────────────────────────────────────────
         CfnOutput(self, "ApiUrl",          value=http_api.api_endpoint)
         CfnOutput(self, "UserPoolId",      value=user_pool.user_pool_id)
@@ -578,3 +611,4 @@ class InfraStack(Stack):
         CfnOutput(self, "SpeciesNetFnArn",          value=speciesnet_fn.function_arn)
         CfnOutput(self, "PostConfirmationFnArn",    value=post_confirmation_fn.function_arn)
         CfnOutput(self, "ConsolidatorFnArn",        value=consolidator_fn.function_arn)
+        CfnOutput(self, "GbifAllowlistSyncFnArn",   value=gbif_allowlist_sync_fn.function_arn)

@@ -36,6 +36,7 @@ interface ApiFrameItem {
   annotated_at?:      string | null;
   annotation_source?: string | null;
   taxonomic_level?:   string | null;
+  geo_review_flag?:   boolean | null;
 }
 
 // Frame-annotations só existem para frames onde o MegaDetector encontrou algo
@@ -57,6 +58,7 @@ function mapFrames(items: ApiFrameItem[]): Frame[] {
       cls_conf: f.ai_score ?? 0,
       bbox: f.bbox ?? [0, 0, 0, 0],
       bboxNormalized: true,
+      geoReviewFlag: f.geo_review_flag ?? false,
     } : null,
     // status alimenta o dot do Filmstrip: aqui usado como "confirmado" vs "pendente",
     // não como faixa de confiança da IA (que é o uso original no /  local).

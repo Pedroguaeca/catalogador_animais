@@ -3,6 +3,7 @@
 import { useRef, useEffect, useState } from "react";
 import { Search, X, Sparkles, Check, CheckCircle2, ChevronLeft, ChevronRight, SkipForward, Film, PencilLine, SplitSquareHorizontal, Minus, Plus } from "lucide-react";
 import type { Detection, Category } from "../lib/types";
+import { InfoTooltip } from "./InfoTooltip";
 
 interface IdentificationPanelProps {
   detection: Detection | null;
@@ -225,6 +226,9 @@ export function IdentificationPanel({
               <span className="flex items-center gap-1.5 font-bold" style={{ fontSize: 12, color: "#2D8B5F", ...font }}>
                 <Sparkles size={12} />
                 A IA SUGERE
+                {detection?.geoReviewFlag && (
+                  <InfoTooltip text="Sem registro de ocorrência confirmado no Brasil (GBIF) — possível erro de classificação, revisar com atenção." />
+                )}
               </span>
             )}
 

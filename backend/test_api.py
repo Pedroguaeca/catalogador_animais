@@ -96,6 +96,7 @@ def _frame_ann_item(
     taxonomic_level: str | None = None,
     annotation_source: str | None = None,
     annotated_at: str | None = None,
+    geo_review_flag: bool | None = None,
 ) -> dict:
     item: dict = {
         "tenant_id":          TENANT_ID,
@@ -118,6 +119,8 @@ def _frame_ann_item(
         item["annotation_source"] = annotation_source
     if annotated_at is not None:
         item["annotated_at"] = annotated_at
+    if geo_review_flag is not None:
+        item["geo_review_flag"] = geo_review_flag
     return item
 
 
@@ -1297,6 +1300,48 @@ class TestTaxonomicLevel(unittest.TestCase):
         from backend.api import _taxonomic_level
         self.assertEqual(_taxonomic_level({"annotated_species": "Crypturellus"}), "genus")
         self.assertEqual(_taxonomic_level({"annotated_species": "totalmentedesconhecido"}), "unidentified")
+
+
+class TestVideoFramesGeoReviewFlag(unittest.TestCase):
+    """Entrega (b) do geofencing (SIAB-187): GET .../videos/{id}/frames expõe
+    geo_review_flag sem precisar de whitelist — _clean() já repassa qualquer
+    campo presente no item do DynamoDB. Este teste protege contra uma futura
+    refatoração que troque _clean() por uma serialização com campos fixos."""
+
+    def _ann_table(self, items: list[dict]):
+        ann_tbl = MagicMock()
+        ann_tbl.query.return_value = {"Items": items}
+        return ann_tbl
+
+    def test_geo_review_flag_true_is_exposed(self):
+        ann_tbl = self._ann_table([
+            _frame_ann_item("vid-001", species="penelope purpurascens", geo_review_flag=True),
+        ])
+        with patch("backend.api._frame_annotations_table", return_value=ann_tbl), \
+             patch("backend.api._presigned_url", return_value="https://s3.example.com/frame.jpg"):
+            resp = client.get("/projects/proj-001/videos/vid-001/frames")
+        frame = resp.json()["frames"][0]
+        self.assertIs(frame["geo_review_flag"], True)
+
+    def test_geo_review_flag_false_is_exposed(self):
+        ann_tbl = self._ann_table([
+            _frame_ann_item("vid-001", species="cuniculus paca", geo_review_flag=False),
+        ])
+        with patch("backend.api._frame_annotations_table", return_value=ann_tbl), \
+             patch("backend.api._presigned_url", return_value="https://s3.example.com/frame.jpg"):
+            resp = client.get("/projects/proj-001/videos/vid-001/frames")
+        frame = resp.json()["frames"][0]
+        self.assertIs(frame["geo_review_flag"], False)
+
+    def test_frame_without_geo_review_flag_omits_field(self):
+        """Frame anotado antes desta entrega (ou por um rollup taxonômico que
+        nunca passa pela checagem GBIF) simplesmente não tem o campo."""
+        ann_tbl = self._ann_table([_frame_ann_item("vid-001", species="didelphidae")])
+        with patch("backend.api._frame_annotations_table", return_value=ann_tbl), \
+             patch("backend.api._presigned_url", return_value="https://s3.example.com/frame.jpg"):
+            resp = client.get("/projects/proj-001/videos/vid-001/frames")
+        frame = resp.json()["frames"][0]
+        self.assertNotIn("geo_review_flag", frame)
 
 
 class TestStatsTaxonomicMetrics(unittest.TestCase):
