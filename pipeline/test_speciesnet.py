@@ -24,6 +24,7 @@ from pipeline.speciesnet_handler import (
     _frame_index,
     _group_to_appearance,
     _write_appearance,
+    _write_frame_annotations,
     gap_track,
 )
 
@@ -579,3 +580,102 @@ class TestWriteAppearance:
             _write_appearance(self._base_app(), "t1", "p1", "v1")
         item = mock_table.put_item.call_args[1]["Item"]
         assert item["model_version"] == "speciesnet-v5.0.5"
+
+
+# ── _write_frame_annotations ────────────────────────────────────────────────────
+
+
+class _FakeFrameAnnotationsTable:
+    """Fake mínima de siab-frame-annotations que só implementa update_item,
+    reproduzindo a semântica real do DynamoDB: um SET só sobrescreve os
+    atributos citados na UpdateExpression, o resto do item existente
+    permanece intacto. Não usa moto (não é dependência do projeto) — só
+    o suficiente pra provar que _write_frame_annotations não apaga campos
+    que não está tentando atualizar.
+    """
+
+    def __init__(self):
+        self.items: dict[tuple, dict] = {}
+
+    def update_item(self, Key, UpdateExpression, ExpressionAttributeValues):
+        pk = (Key["tenant_id"], Key["video_id#frame_idx"])
+        item = self.items.setdefault(pk, dict(Key))
+        assert UpdateExpression.strip().startswith("SET "), UpdateExpression
+        for assignment in UpdateExpression[len("SET "):].split(","):
+            attr, placeholder = (s.strip() for s in assignment.split("="))
+            item[attr] = ExpressionAttributeValues[placeholder]
+
+
+def make_frame_cls(species="didelphidae", score=0.99, level="family", tenant="t1", video="v1", frame_num=1):
+    return Classification(
+        appearance_id=str(uuid.uuid4()),
+        frame_s3_key=f"{tenant}/frames/{video}/frame_{frame_num:05d}.jpg",
+        species=species,
+        species_score=score,
+        taxonomic_level=level,
+        taxonomic_path="mammalia;didelphimorphia;didelphidae",
+        camera_id=None,
+        bbox=(0.1, 0.2, 0.3, 0.4),
+        model_version="speciesnet-v5.0.5",
+    )
+
+
+class TestWriteFrameAnnotations:
+    """Regressão do incidente SIAB-187: reprocessar um vídeo já revisado
+    (geofencing corrigido depois de um review humano) não pode apagar
+    annotated_species/annotation_source/annotated_at."""
+
+    def test_preserves_human_annotation_on_reprocess(self):
+        fake_table = _FakeFrameAnnotationsTable()
+        pk = ("t1", "v1#00001")
+        fake_table.items[pk] = {
+            "tenant_id":           "t1",
+            "video_id#frame_idx":  "v1#00001",
+            "video_id":            "v1",
+            "frame_idx":           1,
+            "frame_s3_key":        "t1/frames/v1/frame_00001.jpg",
+            "ai_species":          "didelphis virginiana",  # valor errado, pré-fix de geofencing
+            "ai_score":            Decimal("0.95"),
+            "bbox":                [Decimal("0.1"), Decimal("0.2"), Decimal("0.3"), Decimal("0.4")],
+            "taxonomic_level":     "species",
+            "annotated_species":   "didelphis virginiana",
+            "annotation_source":   "auto",
+            "annotated_at":        "2026-07-24T20:56:04+00:00",
+        }
+
+        cls = make_frame_cls(species="didelphidae", score=0.99, level="family", frame_num=1)
+        with patch("pipeline.speciesnet_handler._frame_anns", fake_table):
+            _write_frame_annotations([cls], tenant_id="t1", video_id="v1")
+
+        item = fake_table.items[pk]
+        # campos humanos sobrevivem intactos
+        assert item["annotated_species"] == "didelphis virginiana"
+        assert item["annotation_source"] == "auto"
+        assert item["annotated_at"] == "2026-07-24T20:56:04+00:00"
+        # campos de IA foram corrigidos pelo reprocessamento
+        assert item["ai_species"] == "didelphidae"
+        assert item["taxonomic_level"] == "family"
+        assert item["ai_score"] == Decimal("0.99")
+
+    def test_frame_without_prior_human_annotation_still_gets_ai_fields(self):
+        """Frame novo (nunca revisado) continua recebendo os campos normalmente."""
+        fake_table = _FakeFrameAnnotationsTable()
+        cls = make_frame_cls(species="dasyprocta leporina", score=0.87, level="species", frame_num=2)
+
+        with patch("pipeline.speciesnet_handler._frame_anns", fake_table):
+            _write_frame_annotations([cls], tenant_id="t1", video_id="v1")
+
+        item = fake_table.items[("t1", "v1#00002")]
+        assert item["ai_species"] == "dasyprocta leporina"
+        assert item["taxonomic_level"] == "species"
+        assert "annotated_species" not in item
+
+    def test_uses_update_item_not_put_item(self):
+        """put_item substituiria o item inteiro — a fake nem implementa
+        put_item, então qualquer regressão pra put_item quebra este teste
+        com AttributeError."""
+        fake_table = _FakeFrameAnnotationsTable()
+        cls = make_frame_cls(frame_num=3)
+        with patch("pipeline.speciesnet_handler._frame_anns", fake_table):
+            _write_frame_annotations([cls], tenant_id="t1", video_id="v1")
+        assert ("t1", "v1#00003") in fake_table.items

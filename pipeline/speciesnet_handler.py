@@ -174,14 +174,17 @@ def _write_frame_annotations(
 
     Chamado ANTES de gap_track(), para que os dados por frame não sejam descartados.
     SK: video_id#frame_idx (zero-padded 5 dígitos) — uma linha por frame.
+
+    Usa update_item (não put_item) tocando só os campos que vêm do
+    pipeline. Um reprocessamento (ex: correção de geofencing) roda sobre
+    um vídeo que pode já ter sido revisado por um humano — put_item
+    substituiria o item inteiro e apagaria annotated_species/
+    annotation_source/annotated_at (incidente real: SIAB-187).
     """
     # O MegaDetector pode retornar mais de uma detecção (bbox) no mesmo frame,
     # o que gera mais de uma Classification com o mesmo frame_idx. Por
     # ADR-0002 (individual_count=1 no MVP; tracking de múltiplos indivíduos
-    # por frame é V1), mantemos aqui só a de maior confiança por frame — sem
-    # isso o batch_writer tenta gravar duas chaves iguais no mesmo lote e o
-    # DynamoDB rejeita o BatchWriteItem inteiro (ValidationException:
-    # "Provided list of item keys contains duplicates").
+    # por frame é V1), mantemos aqui só a de maior confiança por frame.
     best_by_frame: dict[int, object] = {}
     for c in classifications:
         frame_idx = _frame_index(c.frame_s3_key)
@@ -189,26 +192,36 @@ def _write_frame_annotations(
         if current_best is None or c.species_score > current_best.species_score:
             best_by_frame[frame_idx] = c
 
-    with _frame_anns.batch_writer() as batch:
-        for frame_idx, c in best_by_frame.items():
-            batch.put_item(Item={
+    for frame_idx, c in best_by_frame.items():
+        # species/genus/family/order/class já são os valores corretos do
+        # enum de nivel_taxonomico; blank/animal/unknown/vehicle não são
+        # níveis taxonômicos de verdade — normaliza pra "unidentified".
+        taxonomic_level = (
+            c.taxonomic_level
+            if c.taxonomic_level in ("species", "genus", "family", "order", "class")
+            else "unidentified"
+        )
+        _frame_anns.update_item(
+            Key={
                 "tenant_id":          tenant_id,
                 "video_id#frame_idx": f"{video_id}#{frame_idx:05d}",
-                "video_id":           video_id,
-                "frame_idx":          frame_idx,
-                "frame_s3_key":       c.frame_s3_key,
-                "ai_species":         c.species,
-                "ai_score":           Decimal(str(round(c.species_score, 4))),
-                "bbox":               [Decimal(str(round(v, 4))) for v in c.bbox],
-                # species/genus/family/order/class já são os valores corretos do
-                # enum de nivel_taxonomico; blank/animal/unknown/vehicle não são
-                # níveis taxonômicos de verdade — normaliza pra "unidentified".
-                "taxonomic_level":    (
-                    c.taxonomic_level
-                    if c.taxonomic_level in ("species", "genus", "family", "order", "class")
-                    else "unidentified"
-                ),
-            })
+            },
+            UpdateExpression=(
+                "SET video_id = :video_id, frame_idx = :frame_idx, "
+                "frame_s3_key = :frame_s3_key, ai_species = :ai_species, "
+                "ai_score = :ai_score, bbox = :bbox, "
+                "taxonomic_level = :taxonomic_level"
+            ),
+            ExpressionAttributeValues={
+                ":video_id":       video_id,
+                ":frame_idx":      frame_idx,
+                ":frame_s3_key":   c.frame_s3_key,
+                ":ai_species":     c.species,
+                ":ai_score":       Decimal(str(round(c.species_score, 4))),
+                ":bbox":           [Decimal(str(round(v, 4))) for v in c.bbox],
+                ":taxonomic_level": taxonomic_level,
+            },
+        )
 
 
 # ── Gravação no DynamoDB ──────────────────────────────────────────────────────
