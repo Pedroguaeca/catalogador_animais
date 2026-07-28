@@ -437,6 +437,23 @@ class TestClassifySpeciesGbifAllowlist:
         result, _ = self._run(self.PENELOPE, 0.9, "BRA", allowlist=allowlist, tmp_path=tmp_path)
         assert result[0].geo_review_flag is False
 
+    def test_species_with_br_occurrence_but_too_few_records_still_flagged(self, tmp_path):
+        """Caso real (28/07): penelope purpurascens tinha ocorre_br=true no sync
+        de produção, mas só 3 registros (espécimes de museu, provável erro de
+        localidade) — booleano puro deixava passar o caso que motivou a task
+        inteira. Limiar (GBIF_MIN_OCCURRENCE_RECORDS=10) precisa flagar mesmo
+        com ocorre_br=true."""
+        allowlist = {"penelope purpurascens": {"ocorre_br": True, "n_registros_gbif": 3}}
+        result, _ = self._run(self.PENELOPE, 0.9, "BRA", allowlist=allowlist, tmp_path=tmp_path)
+        assert result[0].geo_review_flag is True
+
+    def test_species_with_br_occurrence_above_threshold_not_flagged(self, tmp_path):
+        """Caso real (28/07): nasua nasua, 4602 registros no sync de produção —
+        continua não sinalizado."""
+        allowlist = {"penelope purpurascens": {"ocorre_br": True, "n_registros_gbif": 4602}}
+        result, _ = self._run(self.PENELOPE, 0.9, "BRA", allowlist=allowlist, tmp_path=tmp_path)
+        assert result[0].geo_review_flag is False
+
     def test_non_species_rollup_never_flagged(self, tmp_path):
         """Rollup pra gênero/família (já resolvido pelo geofence embutido) não
         passa pela checagem GBIF — level != "species"."""

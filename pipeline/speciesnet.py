@@ -31,6 +31,12 @@ MODEL_NAME        = os.environ.get("SN_MODEL", "/tmp/models/speciesnet/v4.0.3a")
 MODEL_S3_PREFIX   = os.environ.get("SN_MODEL_S3_PREFIX", "models/speciesnet/v4.0.3a")
 MODEL_LOCAL_DIR   = os.environ.get("SN_MODEL_LOCAL_DIR", "/tmp/models/speciesnet/v4.0.3a")
 GBIF_ALLOWLIST_S3_KEY = os.environ.get("GBIF_ALLOWLIST_S3_KEY", "models/gbif/br_allowlist.json")
+# Registros de ocorrência abaixo desse limiar não contam como confirmação real
+# — achado 28/07: Penelope purpurascens tinha ocorre_br=true no GBIF pra BR,
+# mas só 3 registros (espécimes de museu, provável erro de localidade), contra
+# centenas/milhares de espécies legitimamente brasileiras. Booleano puro
+# deixava passar exatamente o caso que motivou essa camada (SIAB-187).
+GBIF_MIN_OCCURRENCE_RECORDS = 10
 
 # Cache em memória: model_name → objeto SpeciesNet carregado
 _model_cache: dict[str, Any] = {}
@@ -343,7 +349,13 @@ def classify_species(
             if country and level == "species":
                 allowlist = _get_gbif_allowlist(bucket, s3_client=s3)
                 entry = allowlist.get(species)
-                geo_review_flag = entry is None or not entry.get("ocorre_br", False)
+                if entry is None:
+                    geo_review_flag = True
+                else:
+                    geo_review_flag = not (
+                        entry.get("ocorre_br", False)
+                        and entry.get("n_registros_gbif", 0) >= GBIF_MIN_OCCURRENCE_RECORDS
+                    )
 
             classifications.append(Classification(
                 appearance_id=str(uuid.uuid4()),
