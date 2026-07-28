@@ -221,6 +221,9 @@ export function IdentificationPanel({
               <span className="flex items-center gap-1.5 font-bold" style={{ fontSize: 12, color: "#2D8B5F", ...font }}>
                 <CheckCircle2 size={13} />
                 REVISADO
+                {detection?.geoReviewFlag && (
+                  <InfoTooltip text="Sem registro de ocorrência confirmado no Brasil (GBIF) — a espécie confirmada aqui pode estar geograficamente incorreta, revisar com atenção." />
+                )}
               </span>
             ) : (
               <span className="flex items-center gap-1.5 font-bold" style={{ fontSize: 12, color: "#2D8B5F", ...font }}>
