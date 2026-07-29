@@ -8,15 +8,18 @@ Estratégia:
 """
 
 import io
+import json
+import logging
 import os
 import tempfile
+from decimal import Decimal
 from unittest.mock import MagicMock, patch, call
 
 import cv2
 import numpy as np
 import pytest
 
-from pipeline.ingester import ingest_video, IngestResult, _s3_key
+from pipeline.ingester import ingest_video, IngestResult, _s3_key, lambda_handler, _update_video_status
 
 
 # ── Fixture: vídeo sintético ──────────────────────────────────────────────────
@@ -158,3 +161,161 @@ def test_falha_s3_propaga_excecao(synthetic_video_path):
             bucket="bucket-inexistente",
             s3_client=broken_s3,
         )
+
+
+# ── Helpers para testes do lambda_handler ─────────────────────────────────────
+
+def _make_sqs_event(
+    video_s3_key: str = "tenant-abc/videos/vid-001.avi",
+    tenant_id: str = "tenant-abc",
+    project_id: str = "proj-001",
+    video_id: str = "vid-001",
+) -> dict:
+    return {
+        "Records": [{
+            "body": json.dumps({
+                "video_s3_key": video_s3_key,
+                "tenant_id":    tenant_id,
+                "project_id":   project_id,
+                "video_id":     video_id,
+            })
+        }]
+    }
+
+
+def _make_boto3_mocks():
+    """Devolve (mock_client_fn, mock_s3, mock_sqs, mock_ddb, cameras_table, videos_table).
+
+    Usa side_effect em ddb.Table para que siab-cameras e siab-videos
+    devolvam mocks independentes — evita confundir chamadas de _ensure_camera
+    com as de _update_video_status no mesmo assert.
+    """
+    mock_s3  = MagicMock()
+    mock_sqs = MagicMock()
+    mock_ddb = MagicMock()
+    cameras_table = MagicMock()
+    videos_table  = MagicMock()
+
+    def _table(name):
+        return cameras_table if "cameras" in name else videos_table
+
+    mock_ddb.Table.side_effect = _table
+
+    def _client(service, **kw):
+        return mock_s3 if service == "s3" else mock_sqs
+
+    return _client, mock_s3, mock_sqs, mock_ddb, cameras_table, videos_table
+
+
+# ── Testes do lambda_handler: update_item em siab-videos ─────────────────────
+
+class TestLambdaHandlerUpdateVideoStatus:
+
+    def _run_handler(self, event, mock_ocr_meta, *, ocr_raises=False):
+        """Executa lambda_handler com todos os side-effects mockados.
+
+        Devolve (response, videos_table_mock) — o mock da tabela siab-videos
+        é separado do da siab-cameras para que os asserts sejam unívocos.
+        """
+        client_fn, mock_s3, mock_sqs, mock_ddb, _, videos_table = _make_boto3_mocks()
+
+        mock_ingest_result = IngestResult(
+            tenant_id="tenant-abc", project_id="proj-001", video_id="vid-001",
+            s3_keys=["tenant-abc/frames/vid-001/frame_00000.jpg"],
+            total_frames=1, fps=5.0, duration_seconds=1.0,
+        )
+
+        with (
+            patch("pipeline.ingester.boto3.client", side_effect=client_fn),
+            patch("pipeline.ingester.boto3.resource", return_value=mock_ddb),
+            patch("pipeline.ocr.extract_video_metadata",
+                  side_effect=RuntimeError("sem overlay") if ocr_raises else None,
+                  return_value=mock_ocr_meta),
+            patch("pipeline.ingester.ingest_video", return_value=mock_ingest_result),
+            patch("os.path.exists", return_value=False),
+            patch.dict(os.environ, {"FRAMES_QUEUE_URL": "https://sqs.amazonaws.com/123/siab-frames"}),
+        ):
+            resp = lambda_handler(event, {})
+
+        return resp, videos_table
+
+    def test_update_item_chamado_com_key_correto(self):
+        """update_item deve usar tenant_id e project_id#video_id como chave."""
+        from pipeline.ocr import VideoMetadata
+        meta = VideoMetadata(camera_id="0004", captured_at="2025-01-11T08:14:30",
+                             temperature_c=19.0, location_source="ocr")
+        event = _make_sqs_event()
+        _, mock_table = self._run_handler(event, meta)
+
+        mock_table.update_item.assert_called_once()
+        kw = mock_table.update_item.call_args.kwargs
+        assert kw["Key"] == {
+            "tenant_id":           "tenant-abc",
+            "project_id#video_id": "proj-001#vid-001",
+        }
+
+    def test_update_item_contem_4_campos_e_status_processing(self):
+        """UpdateExpression deve conter os 4 campos; status deve ser 'processing'."""
+        from pipeline.ocr import VideoMetadata
+        meta = VideoMetadata(camera_id="0004", captured_at="2025-01-11T08:14:30",
+                             temperature_c=19.0, location_source="ocr")
+        event = _make_sqs_event()
+        _, mock_table = self._run_handler(event, meta)
+
+        kw = mock_table.update_item.call_args.kwargs
+        assert kw["ExpressionAttributeNames"] == {"#status": "status"}
+
+        vals = kw["ExpressionAttributeValues"]
+        assert vals[":status"]      == "processing"
+        assert vals[":camera_id"]   == "0004"
+        assert vals[":captured_at"] == "2025-01-11T08:14:30"
+        assert vals[":temperature_c"] == Decimal("19.0")
+
+    def test_status_avanca_para_processing_mesmo_com_ocr_total_failure(self, caplog):
+        """OCR que falha completamente não deve travar o vídeo em 'uploaded'."""
+        event = _make_sqs_event()
+
+        with caplog.at_level(logging.WARNING, logger="pipeline.ingester"):
+            resp, mock_table = self._run_handler(event, mock_ocr_meta=None, ocr_raises=True)
+
+        assert resp == {"statusCode": 200}
+        mock_table.update_item.assert_called_once()
+        vals = mock_table.update_item.call_args.kwargs["ExpressionAttributeValues"]
+        assert vals[":status"]        == "processing"
+        assert vals[":camera_id"]     is None
+        assert vals[":captured_at"]   is None
+        assert vals[":temperature_c"] is None
+        assert any("OCR falhou" in r.message for r in caplog.records)
+
+
+# ── Teste direto de _update_video_status ─────────────────────────────────────
+
+def test_update_video_status_usa_expression_attribute_names():
+    """'status' é palavra reservada: ExpressionAttributeNames obrigatório."""
+    mock_ddb = MagicMock()
+    mock_table = MagicMock()
+    mock_ddb.Table.return_value = mock_table
+
+    _update_video_status(mock_ddb, "t1", "p1", "v1", "0004", "2025-01-11T08:14:30", 19.0)
+
+    kw = mock_table.update_item.call_args.kwargs
+    assert "#status" in kw["ExpressionAttributeNames"]
+    assert kw["ExpressionAttributeNames"]["#status"] == "status"
+    assert "#status" in kw["UpdateExpression"]
+
+
+def test_update_video_status_nao_propaga_excecao_dynamo(caplog):
+    """Falha no DynamoDB não deve derrubar o pipeline."""
+    from botocore.exceptions import ClientError
+    mock_ddb = MagicMock()
+    mock_table = MagicMock()
+    mock_table.update_item.side_effect = ClientError(
+        {"Error": {"Code": "ResourceNotFoundException", "Message": "table not found"}},
+        "UpdateItem",
+    )
+    mock_ddb.Table.return_value = mock_table
+
+    with caplog.at_level(logging.WARNING, logger="pipeline.ingester"):
+        _update_video_status(mock_ddb, "t1", "p1", "v1", None, None, None)
+
+    assert any("_update_video_status falhou" in r.message for r in caplog.records)

@@ -83,6 +83,24 @@ class TestParseOverlayText(unittest.TestCase):
             self.assertIsNotNone(meta, f"Falhou para: {text!r}")
             self.assertAlmostEqual(meta.temperature_c, 19.0)
 
+    def test_temperature_cf_cooccurrence_no_degree_symbol(self):
+        # DSCF0016: "30 C 86 F" sem símbolo ° (Bug B)
+        meta = _parse_overlay_text("0016 30 C 86 F 16/01/2025 10:22:45 0007")
+        self.assertIsNotNone(meta)
+        self.assertAlmostEqual(meta.temperature_c, 30.0)
+
+    def test_temperature_cf_does_not_break_existing_cases(self):
+        # Casos que já passavam não devem regredir após o fallback C+F
+        cases = [
+            ("0007 19°C 66°F 11/01/2025 08:14:30 0007", 19.0),
+            ("0014 26°C 79°F 14/01/2025 19:32:10 0007", 26.0),
+            ("0015 28°C 82°F 15/01/2025 07:55:00 0007", 28.0),
+        ]
+        for text, expected_temp in cases:
+            meta = _parse_overlay_text(text)
+            self.assertIsNotNone(meta, f"Falhou para: {text!r}")
+            self.assertAlmostEqual(meta.temperature_c, expected_temp, msg=f"Temperatura errada para: {text!r}")
+
 
 class TestExtractOverlayBar(unittest.TestCase):
     """Testa extracção da barra do overlay."""
@@ -115,6 +133,37 @@ class TestExtractOverlayBar(unittest.TestCase):
             out.release()
             result = _extract_overlay_bar(path)
             self.assertIsNotNone(result)
+        finally:
+            os.unlink(path)
+
+    def _make_avi_with_bar_dark_ratio(self, dark_ratio: float) -> str:
+        """Cria AVI sintético com dark_ratio controlado na barra inferior."""
+        f = tempfile.NamedTemporaryFile(suffix=".avi", delete=False)
+        path = f.name
+        f.close()
+        out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"MJPG"), 1, (320, 240))
+        frame = np.full((240, 320, 3), (100, 150, 80), dtype=np.uint8)
+        bar_start = int(240 * 0.88)
+        n_dark_cols = int(320 * dark_ratio)
+        frame[bar_start:, :n_dark_cols] = (5, 5, 5)
+        frame[bar_start:, n_dark_cols:] = (160, 160, 160)
+        out.write(frame)
+        out.release()
+        return path
+
+    def test_dark_ratio_below_threshold_rejected(self):
+        # dark_ratio ~0.37: abaixo de 0.40 → overlay rejeitado (regressão Bug A)
+        path = self._make_avi_with_bar_dark_ratio(0.37)
+        try:
+            self.assertIsNone(_extract_overlay_bar(path))
+        finally:
+            os.unlink(path)
+
+    def test_dark_ratio_0455_accepted_after_threshold_lowered(self):
+        # dark_ratio ~0.455: era rejeitado com 0.50, deve ser aceite com 0.40 (Bug A)
+        path = self._make_avi_with_bar_dark_ratio(0.455)
+        try:
+            self.assertIsNotNone(_extract_overlay_bar(path))
         finally:
             os.unlink(path)
 
