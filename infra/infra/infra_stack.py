@@ -238,7 +238,7 @@ class InfraStack(Stack):
                 file="Dockerfile",
             ),
             architecture=_lambda.Architecture.ARM_64,
-            memory_size=3008,
+            memory_size=5000,
             timeout=_lambda_timeout,
             environment={
                 "SIAB_BUCKET":          "siab-media-dev",
