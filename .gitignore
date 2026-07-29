@@ -55,3 +55,17 @@ frontend/.env.local
 frontend/node_modules/
 frontend/.next/
 
+.vercel
+
+# Backups e dados de referência (mantidos no disco, não versionados)
+backups/
+consultorias_fauna_siab.csv
+
+# Claude Code — estado local da máquina
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# CDK synth snapshots avulsos (não o cdk.out padrão, já coberto em infra/.gitignore)
+infra/cdk.out.diff/
+infra/cdk.out2/
+infra/cdk.out3/

@@ -1,0 +1,7 @@
+# Exclui arquivos de teste e cache do build context Docker
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+test_*.py
+*.md
