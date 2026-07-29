@@ -211,6 +211,7 @@ def detect_animals(
                 img_rgb,
                 image_id=key,
                 detection_threshold=threshold,
+                image_size=640,
             )
         except Exception as exc:
             logger.warning("Inferência falhou para %s: %s", key, exc)
