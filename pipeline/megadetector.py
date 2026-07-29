@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 BUCKET_NAME    = os.environ.get("SIAB_BUCKET", "siab-media-dev")
 MODEL_CACHE_DIR = os.environ.get("MD_CACHE_DIR", "/tmp/models")
+MODEL_S3_KEY   = os.environ.get("MD_MODEL_S3_KEY", "models/md_v5a.0.0.pt")
 
 # Mapa de categoria numérica → string legível
 _LABEL_MAP: dict[str, str] = DEFAULT_DETECTOR_LABEL_MAP  # {'1':'animal', ...}
@@ -190,6 +191,7 @@ def detect_animals(
     model_path = model_path or os.path.join(MODEL_CACHE_DIR, "md_v5a.0.0.pt")
     s3         = s3_client or boto3.client("s3")
 
+    download_model(bucket, MODEL_S3_KEY, model_path, s3_client=s3)
     detector = _get_detector(model_path)
 
     results: list[Detection] = []
