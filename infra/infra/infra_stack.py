@@ -2,6 +2,7 @@ import aws_cdk as cdk
 from aws_cdk import (
     Duration,
     RemovalPolicy,
+    Size,
     Stack,
     CfnOutput,
     aws_dynamodb as ddb,
@@ -238,7 +239,7 @@ class InfraStack(Stack):
                 file="Dockerfile",
             ),
             architecture=_lambda.Architecture.ARM_64,
-            memory_size=5000,
+            memory_size=3008,
             timeout=_lambda_timeout,
             environment={
                 "SIAB_BUCKET":          "siab-media-dev",
@@ -260,6 +261,7 @@ class InfraStack(Stack):
             ),
             architecture=_lambda.Architecture.ARM_64,
             memory_size=3008,
+            ephemeral_storage_size=Size.mebibytes(2048),
             timeout=_lambda_timeout,
             environment={
                 "SIAB_BUCKET":         "siab-media-dev",
