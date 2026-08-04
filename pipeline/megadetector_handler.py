@@ -25,6 +25,8 @@ _sqs = boto3.client("sqs")
 
 def lambda_handler(event, context):
     """Entry point SQS → MegaDetector → detections_queue."""
+    logging.getLogger().setLevel(logging.INFO)
+
     for record in event.get("Records", []):
         body       = json.loads(record["body"])
         s3_keys    = body["s3_keys"]
