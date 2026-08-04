@@ -276,6 +276,16 @@ export function ReviewPage({ videos, initialVideoId, projectId, categories, cate
     reviewReducer,
     initialState(firstVideoId, videos.find((v) => v.id === firstVideoId)?.frames ?? [], categories)
   );
+
+  // GET /species (page.tsx) resolve depois do fetch de vídeos, sequencial —
+  // ReviewPage já monta com `categories` inicial quase sempre vazio, e o
+  // useReducer só lê esse valor na montagem. Sem isto, o catálogo carregado
+  // depois nunca chegava no state interno (SIAB-189: autocomplete ficava
+  // vazio mesmo com GET /species funcionando).
+  useEffect(() => {
+    if (categories.length > 0) dispatch({ type: "SET_CATEGORIES", payload: categories });
+  }, [categories]);
+
   const [zoom, setZoom] = useState(false);
 
   // Overrides otimistas de novo_evento/tem_filhote/individual_count — os frames

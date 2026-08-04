@@ -169,6 +169,20 @@ export function reviewReducer(state: ReviewState, action: ReviewAction): ReviewS
       };
     }
 
+    // O fetch de GET /species (page.tsx) sempre resolve DEPOIS do de vídeos
+    // (sequencial, não paralelo) — na hora que ReviewPage monta e o
+    // useReducer captura o estado inicial, `categories` quase sempre ainda
+    // é []. Sem essa action, o catálogo carregado depois nunca chegava no
+    // reducer (só a prop mudava, o state interno ficava congelado em [])
+    // — autocomplete continuava vazio mesmo com GET /species funcionando
+    // (SIAB-189). Preserva categorias adicionadas localmente (ADD_CATEGORY,
+    // ainda "pending", não vêm em GET /species que só lista "official").
+    case "SET_CATEGORIES": {
+      const incomingIds = new Set(action.payload.map((c) => c.id));
+      const localOnly = state.categories.filter((c) => !incomingIds.has(c.id));
+      return { ...state, categories: [...localOnly, ...action.payload] };
+    }
+
     default:
       return state;
   }

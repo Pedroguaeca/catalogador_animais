@@ -66,6 +66,7 @@ export type ReviewAction =
   | { type: "CLOSE_NEW_CAT" }
   | { type: "SET_NEW_CAT_NAME"; payload: string }
   | { type: "ADD_CATEGORY"; payload: string }
+  | { type: "SET_CATEGORIES"; payload: Category[] }
   | { type: "MARK_ANNOTATED"; payload: { species: string; source: "ai_confirm" | "chip_select" | "new_category" } }
   | { type: "CONFIRM_ALL_VIDEO"; payload: { frames: Frame[] } };
 
