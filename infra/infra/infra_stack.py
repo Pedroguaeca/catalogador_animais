@@ -205,6 +205,14 @@ class InfraStack(Stack):
             projection_type=ddb.ProjectionType.ALL,
         )
 
+        # Fonte única de verdade sobre quem tem acesso a qual tenant e com
+        # qual papel (SIAB-144). Consumida por dois caminhos hoje:
+        #   - Pre Sign-up Lambda Trigger (infra/lambda/pre_signup), fluxo
+        #     Google OAuth — consulta via email-index, valida status=pending,
+        #     grava custom:tenant_id/custom:role no Cognito e marca active.
+        #   - scripts/invite_user.py, CLI pra criar convites (login email/senha).
+        # role: analyst | approver | admin — status: pending | active | disabled.
+        # Base prevista pra uma futura tela de "gerenciar usuários".
         invites = ddb.Table(
             self, "SiabInvites",
             table_name="siab-invites",
