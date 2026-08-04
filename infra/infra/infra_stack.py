@@ -176,6 +176,35 @@ class InfraStack(Stack):
             projection_type=ddb.ProjectionType.ALL,
         )
 
+        # ── Fase 1 da reestruturação de taxonomia (SIAB-taxonomy) ─────────────
+        # siab-species (acima) continua existindo e sendo lida pelo app nesta
+        # fase — taxon/taxon_name coexistem, sem trocar o que é consultado.
+        # Nomenclatura com hífen (não "_" como no pedido original da task) pra
+        # ficar consistente com as demais 9 tabelas do projeto — nenhuma usa
+        # underscore.
+        taxon = ddb.Table(
+            self, "SiabTaxon",
+            table_name="siab-taxon",
+            partition_key=ddb.Attribute(name="taxon_key", type=ddb.AttributeType.NUMBER),
+            **_common,
+        )
+
+        # SK dummy (name_id sozinho já é único) — GSI por taxon_key é o
+        # access pattern real (buscar todos os nomes de um táxon); sem isso
+        # não dá pra popular nomes vernaculares nem ler de volta na Fase 2.
+        taxon_name = ddb.Table(
+            self, "SiabTaxonName",
+            table_name="siab-taxon-name",
+            partition_key=ddb.Attribute(name="name_id", type=ddb.AttributeType.STRING),
+            **_common,
+        )
+        taxon_name.add_global_secondary_index(
+            index_name="by-taxon-key",
+            partition_key=ddb.Attribute(name="taxon_key", type=ddb.AttributeType.NUMBER),
+            sort_key=     ddb.Attribute(name="name_type",  type=ddb.AttributeType.STRING),
+            projection_type=ddb.ProjectionType.ALL,
+        )
+
         invites = ddb.Table(
             self, "SiabInvites",
             table_name="siab-invites",
@@ -657,6 +686,8 @@ class InfraStack(Stack):
         CfnOutput(self, "ReviewsTable",            value=reviews.table_name)
         CfnOutput(self, "FrameAnnotationsTable",   value=frame_annotations.table_name)
         CfnOutput(self, "SpeciesTable",            value=species.table_name)
+        CfnOutput(self, "TaxonTable",               value=taxon.table_name)
+        CfnOutput(self, "TaxonNameTable",           value=taxon_name.table_name)
         CfnOutput(self, "InvitesTable",            value=invites.table_name)
         CfnOutput(self, "VideosQueueUrl",      value=videos_queue.queue_url)
         CfnOutput(self, "FramesQueueUrl",      value=frames_queue.queue_url)
