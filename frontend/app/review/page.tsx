@@ -80,9 +80,10 @@ function ReviewPageDataLoader() {
   const searchParams = useSearchParams();
   const initialVideoId = searchParams.get("video") ?? undefined;
 
-  const [videos,     setVideos]     = useState<Video[] | null>(null);
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [error,      setError]      = useState<string | null>(null);
+  const [videos,         setVideos]         = useState<Video[] | null>(null);
+  const [categories,     setCategories]     = useState<Category[]>([]);
+  const [error,          setError]          = useState<string | null>(null);
+  const [categoriesError, setCategoriesError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!idToken) return;
@@ -124,19 +125,29 @@ function ReviewPageDataLoader() {
         if (!cancelled) setError(e instanceof Error ? e.message : "Erro ao carregar dados");
       }
 
-      // GET /species é público (sem gate) — falha aqui não deve travar o
-      // carregamento dos vídeos, só deixa o autocomplete vazio.
+      // Falha aqui não deve travar o carregamento dos vídeos — só deixa o
+      // autocomplete vazio, com um aviso discreto (ver categoriesError).
+      // GET /species exige o mesmo token das demais chamadas: o authorizer
+      // JWT do API Gateway cobre toda a API, não existe rota "pública" de
+      // fato (SIAB-189 — a falta desse header era a causa do autocomplete
+      // sempre vazio).
       try {
-        const speciesRes = await fetch(`${API_BASE}/species`);
-        if (speciesRes.ok) {
-          const speciesData = await speciesRes.json();
-          const items: ApiSpeciesItem[] = speciesData.species ?? [];
-          if (!cancelled) {
-            setCategories(items.map((s) => ({ id: s.species_id, name: s.name })));
-          }
+        const speciesRes = await fetch(`${API_BASE}/species`, {
+          headers: apiHeaders(idToken),
+        });
+        if (!speciesRes.ok) throw new Error(`HTTP ${speciesRes.status}`);
+        const speciesData = await speciesRes.json();
+        const items: ApiSpeciesItem[] = speciesData.species ?? [];
+        if (!cancelled) {
+          setCategories(items.map((s) => ({ id: s.species_id, name: s.name })));
+          setCategoriesError(null);
         }
-      } catch {
-        // silencioso — autocomplete fica vazio, "+ Nova categoria" continua funcionando
+      } catch (e) {
+        if (!cancelled) {
+          setCategoriesError(
+            e instanceof Error ? `Catálogo de espécies indisponível (${e.message})` : "Catálogo de espécies indisponível",
+          );
+        }
       }
     })();
 
@@ -169,7 +180,15 @@ function ReviewPageDataLoader() {
     );
   }
 
-  return <ReviewPage videos={videos} initialVideoId={initialVideoId} projectId={PROJECT_ID} categories={categories} />;
+  return (
+    <ReviewPage
+      videos={videos}
+      initialVideoId={initialVideoId}
+      projectId={PROJECT_ID}
+      categories={categories}
+      categoriesError={categoriesError}
+    />
+  );
 }
 
 export default function Review() {

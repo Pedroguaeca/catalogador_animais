@@ -40,6 +40,7 @@ interface ReviewPageProps {
   initialVideoId?: string;
   projectId?: string;
   categories: Category[];
+  categoriesError?: string | null;
 }
 
 function confirmAllVideoOnServer(projectId: string, videoId: string, idToken?: string) {
@@ -75,17 +76,37 @@ function persistFrameIndividualCount(videoId: string, framePath: string, value: 
 }
 
 // Propõe uma categoria nova pro catálogo compartilhado (siab-species) — fica
-// pending até um approver/admin revisar em /especies-pendentes. Fire-and-
-// forget, mesmo padrão non-blocking dos outros PATCH de frame: o chip já foi
-// adicionado localmente (ADD_CATEGORY) e o frame já foi anotado, então não
-// há nada pra esperar aqui.
+// pending até um approver/admin revisar em /especies-pendentes. O chip já foi
+// adicionado localmente (ADD_CATEGORY) antes desta chamada resolver — não dá
+// pra esperar aqui sem travar a UI — mas ao contrário de antes (SIAB-189),
+// uma rejeição do backend (ex: nome não encontrado no GBIF, ver
+// backend/api.py::create_species) agora aparece pro usuário via alert(),
+// não desaparece num catch{} vazio.
+//
+// Gap conhecido, fora do escopo deste fix: essa validação só protege o
+// catálogo (siab-species) — o frame em si já foi anotado com esse nome via
+// persistFrameAnnotation/PATCH /frames/annotation, que não depende do
+// catálogo (annotated_species é uma string solta por design, ver comentário
+// em annotate_frame). Rejeitar aqui não desfaz a anotação do frame.
 function persistSpeciesProposal(name: string, idToken?: string) {
   if (!name.trim()) return;
   fetch(`${API_BASE}/species`, {
     method: "POST",
     headers: apiHeaders(idToken, { "Content-Type": "application/json" }),
     body: JSON.stringify({ name }),
-  }).catch(() => {});
+  })
+    .then(async (r) => {
+      if (r.ok) return;
+      let detail = `HTTP ${r.status}`;
+      try {
+        const body = await r.json();
+        if (body?.detail) detail = body.detail;
+      } catch { /* corpo não era JSON — mantém o HTTP status */ }
+      alert(`Não foi possível salvar "${name}" no catálogo de espécies:\n${detail}`);
+    })
+    .catch((e) => {
+      alert(`Não foi possível salvar "${name}" no catálogo de espécies: ${e instanceof Error ? e.message : e}`);
+    });
 }
 
 function finalizeSegment(videoId: string, values: CheckoutValues, idToken?: string) {
@@ -243,7 +264,7 @@ function computeSegments(
   return { segments, segmentKeyByFramePath };
 }
 
-export function ReviewPage({ videos, initialVideoId, projectId, categories }: ReviewPageProps) {
+export function ReviewPage({ videos, initialVideoId, projectId, categories, categoriesError }: ReviewPageProps) {
   const { data: session } = useSession();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const idToken = (session as any)?.idToken as string | undefined;
@@ -462,6 +483,7 @@ export function ReviewPage({ videos, initialVideoId, projectId, categories }: Re
         <IdentificationPanel
           detection={frame?.detection ?? null}
           categories={state.categories}
+          categoriesError={categoriesError}
           query={state.query}
           selected={state.selected}
           confirmed={state.confirmed}

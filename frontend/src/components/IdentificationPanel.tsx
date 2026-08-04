@@ -1,13 +1,49 @@
 "use client";
 
 import { useRef, useEffect, useState } from "react";
-import { Search, X, Sparkles, Check, CheckCircle2, ChevronLeft, ChevronRight, SkipForward, Film, PencilLine, SplitSquareHorizontal, Minus, Plus } from "lucide-react";
+import { Search, X, Sparkles, Check, CheckCircle2, ChevronLeft, ChevronRight, SkipForward, Film, PencilLine, SplitSquareHorizontal, Minus, Plus, AlertTriangle } from "lucide-react";
 import type { Detection, Category } from "../lib/types";
 import { InfoTooltip } from "./InfoTooltip";
+
+// Busca tolerante a erro de digitação (SIAB-189) — antes disso era um
+// .includes() puro, que não perdoa nem uma letra trocada. Normaliza acento
+// (onça → onca) e cai pra distância de edição por palavra quando não há
+// substring exata, com limiar proporcional ao tamanho da busca (não deixa
+// buscas de 2-3 letras casarem com qualquer coisa).
+const DIACRITICS_RE = new RegExp("[\\u0300-\\u036f]", "g");
+
+function normalize(s: string): string {
+  return s.normalize("NFD").replace(DIACRITICS_RE, "").toLowerCase();
+}
+
+function levenshtein(a: string, b: string): number {
+  const dp: number[][] = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
+  for (let i = 0; i <= a.length; i++) dp[i][0] = i;
+  for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1]
+        ? dp[i - 1][j - 1]
+        : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  return dp[a.length][b.length];
+}
+
+function fuzzyMatch(name: string, query: string): boolean {
+  const nName  = normalize(name);
+  const nQuery = normalize(query);
+  if (!nQuery) return false;
+  if (nName.includes(nQuery)) return true;
+  const threshold = nQuery.length <= 4 ? 1 : nQuery.length <= 8 ? 2 : 3;
+  if (levenshtein(nQuery, nName) <= threshold) return true;
+  return nName.split(/[\s-]+/).some((word) => levenshtein(nQuery, word) <= threshold);
+}
 
 interface IdentificationPanelProps {
   detection: Detection | null;
   categories: Category[];
+  categoriesError?: string | null;
   query: string;
   selected: string | null;
   confirmed: boolean;
@@ -118,6 +154,7 @@ function NavBtn({
 export function IdentificationPanel({
   detection,
   categories,
+  categoriesError,
   query,
   selected,
   confirmed,
@@ -174,9 +211,7 @@ export function IdentificationPanel({
   // Busca é o único caminho de correção manual — sem grade fixa, resultados
   // só aparecem quando o revisor digita algo.
   const filtered = query
-    ? categories.filter((c) =>
-        c.name.toLowerCase().includes(query.toLowerCase())
-      )
+    ? categories.filter((c) => fuzzyMatch(c.name, query))
     : [];
 
   const startCorrection = () => {
@@ -464,6 +499,12 @@ export function IdentificationPanel({
               style={{ background: "#FAF6EE", border: "1.5px solid #E7DECF", borderRadius: 10, color: "#221F1A", ...font, fontSize: 13.5 }}
             />
           </div>
+          {categoriesError && (
+            <div className="flex items-center gap-1.5 pt-1.5" style={{ color: "#B0793A" }}>
+              <AlertTriangle size={11} />
+              <span className="text-xs" style={{ ...font }}>{categoriesError}</span>
+            </div>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto px-3 pb-2 min-h-0">

@@ -29,6 +29,8 @@ import json
 import logging
 import os
 import re
+import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime, timezone
@@ -134,6 +136,32 @@ def _slugify_species_name(name: str) -> str:
     slug = re.sub(r"\s+", "-", slug)
     slug = re.sub(r"[^a-z0-9-]", "", slug)
     return slug
+
+
+GBIF_SPECIES_SEARCH_URL = "https://api.gbif.org/v1/species/search"
+GBIF_TIMEOUT_SECONDS    = 10
+
+
+def _gbif_species_exists(name: str) -> bool | None:
+    """Confirma que `name` resolve a um táxon real no GBIF antes de
+    POST /species persistir (SIAB-189) — species/search em vez de
+    species/match porque cobre nome popular também, não só científico
+    (o catálogo já tem entradas em português, ex. "Paca", "Quati").
+
+    Retorna None se o GBIF estiver inacessível — o chamador decide (não
+    travamos a criação por uma falha de rede transitória, mas também não
+    persistimos sem checar; ver create_species). Mesmo padrão de
+    pipeline/gbif_allowlist_sync.py::_query_gbif_occurrence_br.
+    """
+    params = urllib.parse.urlencode({"q": name, "limit": 1})
+    url = f"{GBIF_SPECIES_SEARCH_URL}?{params}"
+    try:
+        with urllib.request.urlopen(url, timeout=GBIF_TIMEOUT_SECONDS) as resp:
+            data = json.loads(resp.read())
+        return int(data.get("count", 0)) > 0
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as exc:
+        logger.warning("Falha ao consultar GBIF para '%s': %s", name, exc)
+        return None
 
 
 # ── Schemas ────────────────────────────────────────────────────────────────────
@@ -1796,6 +1824,20 @@ def create_species(
     species_id = _slugify_species_name(name)
     if not species_id:
         raise HTTPException(status_code=422, detail="name inválido.")
+
+    # Valida contra o GBIF antes de persistir (SIAB-189) — sem isso, qualquer
+    # string vira categoria "pending" sem checagem nenhuma.
+    gbif_found = _gbif_species_exists(name)
+    if gbif_found is False:
+        raise HTTPException(
+            status_code=422,
+            detail=f"'{name}' não foi encontrado no GBIF — confirme o nome (científico ou popular) e tente de novo.",
+        )
+    if gbif_found is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Não foi possível validar a espécie no GBIF agora (serviço indisponível). Tente novamente em instantes.",
+        )
 
     table = _species_table()
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
