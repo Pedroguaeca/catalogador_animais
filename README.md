@@ -13,6 +13,7 @@ partir de vídeos de câmeras-trap: detecta animais, identifica espécie, consol
 | [`docs/data-model.md`](./docs/data-model.md) | Modelo de dados (DynamoDB) e access patterns |
 | [`docs/pipeline.md`](./docs/pipeline.md) | Pipeline de processamento de vídeo |
 | [`docs/decisions/`](./docs/decisions/) | ADRs — registros de decisões de arquitetura |
+| [`docs/runbook-delecao-manual.md`](./docs/runbook-delecao-manual.md) | Como apagar vídeo/dado manualmente (a UI não expõe isso mais — SIAB-149) |
 
 ## Abordagem técnica em uma frase
 Pipeline de dois estágios (MegaDetector → SpeciesNet/AI4G), consolidando detecções em

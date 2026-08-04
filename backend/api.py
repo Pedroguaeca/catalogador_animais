@@ -38,7 +38,7 @@ from typing import Any, Literal
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from jose import ExpiredSignatureError, JWTError, jwk, jwt
@@ -726,6 +726,9 @@ def _confirmed_appearance_groups(tenant_id: str, project_id: str) -> list[dict]:
         if not lek:
             break
         kwargs["ExclusiveStartKey"] = lek
+
+    # Soft delete (SIAB-149) — ver mesmo filtro em list_videos.
+    videos = [v for v in videos if not v.get("deleted_at")]
 
     groups: list[dict] = []
     for v in videos:
@@ -1685,6 +1688,11 @@ def list_videos(
             break
         kwargs["ExclusiveStartKey"] = lek
 
+    # Soft delete (SIAB-149) — vídeo com deleted_at setado não aparece em
+    # nenhuma listagem/agregação, mesmo que o registro continue existindo
+    # fisicamente. Ver docs/runbook-delecao-manual.md.
+    vids = [v for v in vids if not v.get("deleted_at")]
+
     # Busca todos os registros confirmados do projecto de uma vez (para
     # species/count) — mesmo modelo de dado de /stats e /export, não mais a
     # siab-appearances antiga (ver _confirmed_appearance_groups).
@@ -1749,79 +1757,14 @@ def list_videos(
     return {"project_id": project_id, "count": len(result), "videos": result}
 
 
-@app.delete("/projects/{project_id}/videos/{video_id}", status_code=204)
-def delete_video(
-    project_id: str,
-    video_id:   str,
-    tenant_id:  str = Depends(get_current_tenant),
-):
-    """Remove vídeo: apaga S3 frames + ficheiro + aparições + frame-annotations + registo DynamoDB."""
-    vid_tbl = _videos_table()
-    app_tbl = _appearances_table()
-    ann_tbl = _frame_annotations_table()
-
-    vid_item = vid_tbl.get_item(
-        Key={"tenant_id": tenant_id, "project_id#video_id": f"{project_id}#{video_id}"}
-    ).get("Item")
-    if not vid_item:
-        raise HTTPException(status_code=404, detail="Vídeo não encontrado")
-
-    s3 = _s3_client()
-
-    # Apaga frames no S3
-    prefix = f"{tenant_id}/frames/{video_id}/"
-    paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=BUCKET, Prefix=prefix):
-        objs = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
-        if objs:
-            s3.delete_objects(Bucket=BUCKET, Delete={"Objects": objs})
-
-    # Apaga ficheiro de vídeo
-    s3_key = vid_item.get("s3_key")
-    if s3_key:
-        try:
-            s3.delete_object(Bucket=BUCKET, Key=s3_key)
-        except Exception:
-            pass
-
-    # Apaga aparições associadas
-    apps = app_tbl.query(
-        KeyConditionExpression=(
-            Key("tenant_id").eq(tenant_id)
-            & Key("video_id#appearance_id").begins_with(f"{video_id}#")
-        )
-    ).get("Items", [])
-    for a in apps:
-        app_tbl.delete_item(
-            Key={"tenant_id": tenant_id, "video_id#appearance_id": a["video_id#appearance_id"]}
-        )
-
-    # Apaga frame-annotations associadas (evita órfãs — BUG conhecido, corrigido aqui)
-    anns: list[dict] = []
-    kwargs: dict = {
-        "KeyConditionExpression": (
-            Key("tenant_id").eq(tenant_id)
-            & Key("video_id#frame_idx").begins_with(f"{video_id}#")
-        ),
-    }
-    while True:
-        resp = ann_tbl.query(**kwargs)
-        anns.extend(resp.get("Items", []))
-        lek = resp.get("LastEvaluatedKey")
-        if not lek:
-            break
-        kwargs["ExclusiveStartKey"] = lek
-    for a in anns:
-        ann_tbl.delete_item(
-            Key={"tenant_id": tenant_id, "video_id#frame_idx": a["video_id#frame_idx"]}
-        )
-
-    # Apaga registo do vídeo
-    vid_tbl.delete_item(
-        Key={"tenant_id": tenant_id, "project_id#video_id": f"{project_id}#{video_id}"}
-    )
-
-    return Response(status_code=204)
+# Apagar vídeo foi removido do app inteiramente (SIAB-149: DELETE em cascata
+# apagava frame-annotations com revisão humana confirmada, sem aviso, sem
+# PITR/versionamento — decisão do Conselho INTI foi remover a capacidade em
+# vez de corrigir a UI). Não existe mais rota HTTP nenhuma pra isso — DELETE
+# nem está mais nos métodos roteados pelo API Gateway (infra_stack.py). Uma
+# deleção real hoje só é possível manualmente, seguindo
+# docs/runbook-delecao-manual.md (soft delete + siab-audit-log + checagem de
+# lock obrigatórios).
 
 
 # ── Endpoint 9 — Catálogo de espécies (fila de aprovação) ────────────────────

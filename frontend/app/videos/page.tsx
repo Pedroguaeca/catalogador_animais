@@ -5,7 +5,7 @@ import { useSession } from "next-auth/react";
 import { SiabNav } from "../../src/components/SiabNav";
 import { API_BASE, apiHeaders } from "../../src/lib/api";
 import { statusStyle } from "../../src/lib/statusColors";
-import { Film, Trash2, ExternalLink, Loader2, RefreshCw, AlertCircle } from "lucide-react";
+import { Film, ExternalLink, Loader2, RefreshCw, AlertCircle } from "lucide-react";
 
 const PROJECT_ID = "projeto-junho-2026";
 
@@ -39,7 +39,6 @@ export default function VideosPage() {
   const [videos,   setVideos]   = useState<VideoItem[]>([]);
   const [loading,  setLoading]  = useState(true);
   const [error,    setError]    = useState<string | null>(null);
-  const [deleting, setDeleting] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!idToken) return;
@@ -60,24 +59,6 @@ export default function VideosPage() {
   }, [idToken]);
 
   useEffect(() => { load(); }, [load]);
-
-  const handleDelete = useCallback(async (videoId: string, filename: string | null) => {
-    const label = filename ?? videoId.slice(0, 8);
-    if (!window.confirm(`Apagar vídeo "${label}" e todos os seus dados?\n\nEsta acção não pode ser desfeita.`)) return;
-    setDeleting(videoId);
-    try {
-      const r = await fetch(`${API_BASE}/projects/${PROJECT_ID}/videos/${videoId}`, {
-        method:  "DELETE",
-        headers: apiHeaders(idToken),
-      });
-      if (!r.ok && r.status !== 204) throw new Error(`HTTP ${r.status}`);
-      setVideos((v) => v.filter((x) => x.video_id !== videoId));
-    } catch (e) {
-      alert(`Erro ao apagar: ${e instanceof Error ? e.message : e}`);
-    } finally {
-      setDeleting(null);
-    }
-  }, [idToken]);
 
   return (
     <div className="flex flex-col min-h-screen" style={{ background: "#F7F3EE" }}>
@@ -221,40 +202,20 @@ export default function VideosPage() {
                           </span>
                         </td>
                         <td style={{ padding: "10px 14px" }}>
-                          <div className="flex items-center gap-2">
-                            <a
-                              href={`/review?video=${v.video_id}`}
-                              title="Abrir em Revisão"
-                              style={{
-                                display: "flex", alignItems: "center", gap: 4,
-                                padding: "5px 9px", borderRadius: 8,
-                                border: "1px solid #E7DECF", background: "#fff",
-                                fontSize: 12, color: "#6B6357", textDecoration: "none",
-                                whiteSpace: "nowrap",
-                              }}
-                            >
-                              <ExternalLink size={11} />
-                              Revisão
-                            </a>
-                            <button
-                              onClick={() => handleDelete(v.video_id, v.original_filename)}
-                              disabled={deleting === v.video_id}
-                              title="Apagar vídeo"
-                              style={{
-                                display: "flex", alignItems: "center",
-                                padding: "5px 7px", borderRadius: 8,
-                                border: "1px solid #EBDADA", background: "#fff",
-                                cursor: deleting === v.video_id ? "not-allowed" : "pointer",
-                                color: deleting === v.video_id ? "#C5B9AD" : "#C0392B",
-                                opacity: deleting === v.video_id ? 0.6 : 1,
-                              }}
-                            >
-                              {deleting === v.video_id
-                                ? <Loader2 size={13} className="animate-spin" />
-                                : <Trash2 size={13} />
-                              }
-                            </button>
-                          </div>
+                          <a
+                            href={`/review?video=${v.video_id}`}
+                            title="Abrir em Revisão"
+                            style={{
+                              display: "flex", alignItems: "center", gap: 4,
+                              padding: "5px 9px", borderRadius: 8,
+                              border: "1px solid #E7DECF", background: "#fff",
+                              fontSize: 12, color: "#6B6357", textDecoration: "none",
+                              whiteSpace: "nowrap", width: "fit-content",
+                            }}
+                          >
+                            <ExternalLink size={11} />
+                            Revisão
+                          </a>
                         </td>
                       </tr>
                     );

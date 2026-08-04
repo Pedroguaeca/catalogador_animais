@@ -60,6 +60,28 @@ class InfraStack(Stack):
             ),
         )
 
+        # Versionamento gerido via custom resource pelo mesmo motivo do CORS
+        # acima (bucket importado, não criado pelo CDK). Rede de segurança
+        # contra apagamento/sobrescrita acidental de vídeos/frames — ver
+        # SIAB-149 e docs/runbook-delecao-manual.md.
+        _versioning_call = cr.AwsSdkCall(
+            service="S3",
+            action="putBucketVersioning",
+            parameters={
+                "Bucket": "siab-media-dev",
+                "VersioningConfiguration": {"Status": "Enabled"},
+            },
+            physical_resource_id=cr.PhysicalResourceId.of("siab-media-dev-versioning"),
+        )
+        cr.AwsCustomResource(
+            self, "MediaBucketVersioning",
+            on_create=_versioning_call,
+            on_update=_versioning_call,
+            policy=cr.AwsCustomResourcePolicy.from_sdk_calls(
+                resources=[f"arn:aws:s3:::siab-media-dev"],
+            ),
+        )
+
         # ── DynamoDB — configuração base ──────────────────────────────────────
         _common = dict(
             billing_mode=ddb.BillingMode.PAY_PER_REQUEST,
@@ -79,6 +101,9 @@ class InfraStack(Stack):
             table_name="siab-videos",
             partition_key=ddb.Attribute(name="tenant_id",          type=ddb.AttributeType.STRING),
             sort_key=    ddb.Attribute(name="project_id#video_id", type=ddb.AttributeType.STRING),
+            point_in_time_recovery_specification=ddb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
             **_common,
         )
 
@@ -95,6 +120,9 @@ class InfraStack(Stack):
             table_name="siab-appearances",
             partition_key=ddb.Attribute(name="tenant_id",             type=ddb.AttributeType.STRING),
             sort_key=    ddb.Attribute(name="video_id#appearance_id", type=ddb.AttributeType.STRING),
+            point_in_time_recovery_specification=ddb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
             **_common,
         )
         appearances.add_global_secondary_index(
@@ -131,6 +159,9 @@ class InfraStack(Stack):
             sort_key=    ddb.Attribute(name="video_id#frame_idx", type=ddb.AttributeType.STRING),
             billing_mode=ddb.BillingMode.PAY_PER_REQUEST,
             removal_policy=RemovalPolicy.RETAIN,
+            point_in_time_recovery_specification=ddb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
         )
 
         species = ddb.Table(
@@ -156,6 +187,24 @@ class InfraStack(Stack):
             index_name="email-index",
             partition_key=ddb.Attribute(name="email", type=ddb.AttributeType.STRING),
             projection_type=ddb.ProjectionType.ALL,
+        )
+
+        # Append-only — nenhum handler tem permissão de escrita nela por design
+        # (ver runbook docs/runbook-delecao-manual.md). Registra operações
+        # destrutivas feitas fora do app (script/console AWS), já que o app
+        # não expõe mais nenhuma (SIAB-149/decisão do Conselho INTI).
+        audit_log = ddb.Table(
+            self, "SiabAuditLog",
+            table_name="siab-audit-log",
+            partition_key=ddb.Attribute(name="tenant_id",        type=ddb.AttributeType.STRING),
+            sort_key=    ddb.Attribute(name="timestamp#actor",   type=ddb.AttributeType.STRING),
+            billing_mode=ddb.BillingMode.PAY_PER_REQUEST,
+            # RETAIN (não segue _common=DESTROY) — é o próprio registro de
+            # accountability, não pode desaparecer junto com um `cdk destroy`.
+            removal_policy=RemovalPolicy.RETAIN,
+            point_in_time_recovery_specification=ddb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
         )
 
         # ── SQS — filas do pipeline com DLQs ─────────────────────────────────
@@ -514,6 +563,10 @@ class InfraStack(Stack):
                 expose_headers=["Content-Disposition"],
             ),
         )
+        # HTTP DELETE não é roteado pra Lambda nenhuma — bloqueado no nível do
+        # API Gateway (não só removido do código da app). Nenhum endpoint da
+        # API usa DELETE hoje (SIAB-149: a única rota DELETE, apagar vídeo,
+        # foi removida por decisão de produto — ver docs/runbook-delecao-manual.md).
         http_api.add_routes(
             path="/{proxy+}",
             methods=[
@@ -521,7 +574,6 @@ class InfraStack(Stack):
                 apigwv2.HttpMethod.POST,
                 apigwv2.HttpMethod.PUT,
                 apigwv2.HttpMethod.PATCH,
-                apigwv2.HttpMethod.DELETE,
             ],
             integration=apigwv2_integrations.HttpLambdaIntegration(
                 "ApiIntegration", api_fn,
@@ -599,6 +651,7 @@ class InfraStack(Stack):
         CfnOutput(self, "BucketName",              value=media_bucket.bucket_name)
         CfnOutput(self, "ProjectsTable",           value=projects.table_name)
         CfnOutput(self, "VideosTable",             value=videos_table.table_name)
+        CfnOutput(self, "AuditLogTable",           value=audit_log.table_name)
         CfnOutput(self, "CamerasTable",            value=cameras.table_name)
         CfnOutput(self, "AppearancesTable",        value=appearances.table_name)
         CfnOutput(self, "ReviewsTable",            value=reviews.table_name)
