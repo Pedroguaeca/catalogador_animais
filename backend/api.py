@@ -1145,7 +1145,8 @@ def review_appearance(
 @app.patch("/frames/annotation")
 def annotate_frame(
     body: AnnotationRequest,
-    tenant_id: str = Depends(get_current_tenant),
+    tenant_id:   str = Depends(get_current_tenant),
+    reviewer_id: str = Depends(get_current_sub),
 ):
     """Persiste anotação de espécie por frame e verifica discrepâncias nas aparições.
 
@@ -1153,6 +1154,13 @@ def annotate_frame(
     (ai_species, ai_score, bbox) nem marcadores de revisão (novo_evento,
     tem_filhote, individual_count) já presentes no item ao corrigir a espécie
     de novo.
+
+    reviewed_by/reviewed_at (SIAB-25) — rastreabilidade de quem confirmou/
+    corrigiu a espécie. Campos novos, separados de annotation_source/
+    annotated_at (que já existiam e descrevem a origem da anotação, não
+    quem a fez). Não reconecta PATCH /appearances/{id}/review (endpoint
+    antigo, desconectado da UI atual) — grava direto aqui, no caminho que
+    o /review de hoje realmente usa.
     """
     frame_idx    = _frame_idx_from_path(body.frame_path)
     frame_s3_key = f"{tenant_id}/frames/{body.frame_path}"
@@ -1163,7 +1171,8 @@ def annotate_frame(
         Key={"tenant_id": tenant_id, "video_id#frame_idx": f"{body.video_id}#{frame_idx:05d}"},
         UpdateExpression=(
             "SET video_id = :vid, frame_path = :fp, frame_s3_key = :fsk, frame_idx = :fi, "
-            "annotated_species = :sp, annotation_source = :src, annotated_at = :at"
+            "annotated_species = :sp, annotation_source = :src, annotated_at = :at, "
+            "reviewed_by = :rb, reviewed_at = :rat"
         ),
         ExpressionAttributeValues={
             ":vid": body.video_id,
@@ -1173,6 +1182,8 @@ def annotate_frame(
             ":sp":  body.annotated_species,
             ":src": body.annotation_source,
             ":at":  annotated_at,
+            ":rb":  reviewer_id,
+            ":rat": annotated_at,
         },
     )
 

@@ -481,6 +481,7 @@ export function ReviewPage({ videos, initialVideoId, projectId, categories, cate
             frameIdx={state.frameIdx}
             onSelect={(idx) => dispatch({ type: "SET_FRAME", payload: idx })}
             annotatedFrames={state.annotatedFrames}
+            annotatedSpecies={state.annotatedSpecies}
           />
           <SegmentStrip
             segments={segments}
