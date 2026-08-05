@@ -1428,9 +1428,17 @@ def list_video_segments(
 def confirm_all_frames(
     project_id: str,
     video_id:   str,
-    tenant_id:  str = Depends(get_current_tenant),
+    tenant_id:   str = Depends(get_current_tenant),
+    reviewer_id: str = Depends(get_current_sub),
 ):
-    """Confirma a classificação AI para todos os frames sem anotação humana."""
+    """Confirma a classificação AI para todos os frames sem anotação humana.
+
+    reviewed_by/reviewed_at (SIAB-25) — mesmo campo gravado em annotate_frame,
+    aplicado em lote aqui: "Confirmar vídeo inteiro" é decisão humana (o
+    revisor escolheu aplicar a sugestão da IA a todos os frames de uma vez),
+    mesmo sem revisão individual por frame — sem isso a rastreabilidade tinha
+    um buraco no caminho mais usado na prática.
+    """
     ann_tbl = _frame_annotations_table()
 
     items: list[dict] = []
@@ -1467,13 +1475,16 @@ def confirm_all_frames(
                     "video_id#frame_idx": it["video_id#frame_idx"],
                 },
                 UpdateExpression=(
-                    "SET annotated_species = :s, annotation_source = :src, annotated_at = :at"
+                    "SET annotated_species = :s, annotation_source = :src, annotated_at = :at, "
+                    "reviewed_by = :rb, reviewed_at = :rat"
                 ),
                 ConditionExpression=Attr("annotated_species").not_exists(),
                 ExpressionAttributeValues={
                     ":s":   ai_species,
                     ":src": "auto",
                     ":at":  annotated_at,
+                    ":rb":  reviewer_id,
+                    ":rat": annotated_at,
                 },
             )
             confirmed += 1
