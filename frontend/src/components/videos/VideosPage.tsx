@@ -14,6 +14,23 @@ const DEFAULT_FILTERS: Filters = {
   cameraId: null, species: null, minConfidence: 0, semDeteccaoOnly: false,
 };
 
+// A API pode estar numa versão anterior ao SIAB-105 (deploy de frontend e
+// backend é manual e separado — ver CLAUDE.md) e simplesmente não mandar os
+// campos novos. `undefined` (campo ausente) é diferente de `null` (campo
+// presente, sem dado) — sem isso, .length/.map em ai_species undefined
+// derruba a página inteira com "Application error".
+function normalizeVideo(v: VideoItem): VideoItem {
+  return {
+    ...v,
+    ai_species:    v.ai_species    ?? [],
+    confidence:    v.confidence    ?? null,
+    thumbnail_url: v.thumbnail_url ?? null,
+    reviewed_by:   v.reviewed_by   ?? null,
+    reviewed_at:   v.reviewed_at   ?? null,
+    temperature_c: v.temperature_c ?? null,
+  };
+}
+
 function tabForVideo(v: VideoItem): TabKey {
   if (v.display_status === "Processando") return "processando";
   if (v.display_status === "Revisado")    return "revisado";
@@ -44,11 +61,13 @@ interface VideosPageProps {
   onRefresh: () => void;
 }
 
-export function VideosPage({ videos, loading, error, onRefresh }: VideosPageProps) {
+export function VideosPage({ videos: rawVideos, loading, error, onRefresh }: VideosPageProps) {
   const [activeTab, setActiveTab]           = useState<TabKey>("aguardando");
   const [filters, setFilters]               = useState<Filters>(DEFAULT_FILTERS);
   const [sortOrder, setSortOrder]           = useState<"asc" | "desc">("desc");
   const [selectedVideoId, setSelectedVideoId] = useState<string | null>(null);
+
+  const videos = useMemo(() => rawVideos.map(normalizeVideo), [rawVideos]);
 
   function changeTab(tab: TabKey) {
     setActiveTab(tab);
