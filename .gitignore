@@ -12,6 +12,7 @@ __pycache__/
 # Dados grandes (não versionar)
 videos/
 !frontend/app/videos/
+!frontend/src/components/videos/
 frames/
 dataset/images/
 dataset/labels/

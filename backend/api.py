@@ -1785,6 +1785,44 @@ def list_videos(
             return "Sem detecção"
         return "Processando"
 
+    def _video_extras(anns: list[dict], apps: list[dict]) -> dict:
+        """Campos derivados de siab-frame-annotations/aparições confirmadas
+        (ambos já carregados acima, sem query adicional) — usados pelas abas
+        de status da tela /videos (SIAB-105): tags de espécie sugeridas pela
+        IA (aba Aguardando revisão, onde `species` confirmado ainda está
+        vazio), confiança, thumbnail do melhor frame e rastreabilidade de
+        revisor (aba Revisado)."""
+        ai_species = sorted({a.get("ai_species") for a in anns if a.get("ai_species")})
+
+        confidence: float | None = None
+        if anns and all(a.get("annotated_species") for a in anns):
+            scores = [float(g["species_score"]) for g in apps if g.get("species_score") is not None]
+            confidence = (sum(scores) / len(scores)) if scores else None
+        elif anns:
+            scores = [float(a["ai_score"]) for a in anns if a.get("ai_score") is not None]
+            confidence = max(scores) if scores else None
+
+        thumbnail_url = None
+        with_score = [a for a in anns if a.get("ai_score") is not None]
+        if with_score:
+            best = max(with_score, key=lambda a: float(a["ai_score"]))
+            thumbnail_url = _presigned_url(best.get("frame_s3_key"))
+
+        reviewed_by = reviewed_at = None
+        reviewed = [a for a in anns if a.get("reviewed_at")]
+        if reviewed:
+            latest = max(reviewed, key=lambda a: a["reviewed_at"])
+            reviewed_by = latest.get("reviewed_by")
+            reviewed_at = latest.get("reviewed_at")
+
+        return {
+            "ai_species":    ai_species,
+            "confidence":    confidence,
+            "thumbnail_url": thumbnail_url,
+            "reviewed_by":   reviewed_by,
+            "reviewed_at":   reviewed_at,
+        }
+
     result = []
     for v in sorted(vids, key=lambda x: x.get("captured_at") or x.get("uploaded_at") or ""):
         vid_id = v.get("video_id", "")
@@ -1802,6 +1840,8 @@ def list_videos(
             ),
             "species":           sorted({a.get("species") for a in apps if a.get("species")}),
             "appearance_count":  len(apps),
+            "temperature_c":     v.get("temperature_c"),
+            **_video_extras(anns, apps),
         }))
 
     return {"project_id": project_id, "count": len(result), "videos": result}
