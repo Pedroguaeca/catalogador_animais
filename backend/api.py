@@ -2088,21 +2088,29 @@ def create_species(
 
 @app.get("/species")
 def list_species():
-    """Lista categorias oficiais (aprovadas) — alimenta o autocomplete geral
-    do /review. Sem autenticação (decisão 25/07: fica público)."""
+    """Lista categorias oficiais (aprovadas) + auto-cadastradas pela IA
+    (SIAB-189) — alimenta o autocomplete geral do /review. Sem autenticação
+    (decisão 25/07: fica público).
+
+    "auto" (ver _ensure_species_from_ai, pipeline/speciesnet_handler.py) já
+    passou por validação automática contra o GBIF no momento da criação —
+    fica visível na busca sem esperar aprovação humana, diferente de
+    "pending" (nome livre proposto via "+ Nova espécie", só entra na busca
+    depois de aprovado — ver list_pending_species/review_species)."""
     table = _species_table()
     items: list[dict] = []
-    kwargs: dict = {
-        "IndexName": "by-status",
-        "KeyConditionExpression": Key("status").eq("official"),
-    }
-    while True:
-        resp = table.query(**kwargs)
-        items.extend(resp.get("Items", []))
-        lek = resp.get("LastEvaluatedKey")
-        if not lek:
-            break
-        kwargs["ExclusiveStartKey"] = lek
+    for status in ("official", "auto"):
+        kwargs: dict = {
+            "IndexName": "by-status",
+            "KeyConditionExpression": Key("status").eq(status),
+        }
+        while True:
+            resp = table.query(**kwargs)
+            items.extend(resp.get("Items", []))
+            lek = resp.get("LastEvaluatedKey")
+            if not lek:
+                break
+            kwargs["ExclusiveStartKey"] = lek
     items.sort(key=lambda x: x.get("name", "").lower())
     return {"count": len(items), "species": [_clean(it) for it in items]}
 

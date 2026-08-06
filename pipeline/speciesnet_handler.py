@@ -11,6 +11,10 @@ Fluxo:
 import json
 import logging
 import os
+import re
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -20,8 +24,10 @@ import boto3
 from pipeline.megadetector import Detection
 from pipeline.speciesnet import (
     BUCKET_NAME,
+    GBIF_MIN_OCCURRENCE_RECORDS,
     MODEL_LOCAL_DIR,
     MODEL_S3_PREFIX,
+    _get_gbif_allowlist,
     classify_species,
     download_speciesnet_from_s3,
 )
@@ -31,13 +37,18 @@ logger = logging.getLogger(__name__)
 BUCKET                  = os.environ.get("SIAB_BUCKET",              "siab-media-dev")
 APPEARANCES_TABLE       = os.environ.get("APPEARANCES_TABLE",        "siab-appearances")
 FRAME_ANNOTATIONS_TABLE = os.environ.get("FRAME_ANNOTATIONS_TABLE",  "siab-frame-annotations")
+SPECIES_TABLE           = os.environ.get("SPECIES_TABLE",            "siab-species")
 COUNTRY                 = os.environ.get("SIAB_COUNTRY",             "BRA")
 GAP_FRAMES              = int(os.environ.get("GAP_FRAMES",           "15"))
 MODEL_VERSION           = os.environ.get("SN_MODEL_VERSION",         "speciesnet-v5.0.5")
 
+GBIF_SPECIES_MATCH_URL = "https://api.gbif.org/v1/species/match"
+GBIF_TIMEOUT_SECONDS   = 10
+
 _ddb              = boto3.resource("dynamodb")
 _appearances      = _ddb.Table(APPEARANCES_TABLE)
 _frame_anns       = _ddb.Table(FRAME_ANNOTATIONS_TABLE)
+_species          = _ddb.Table(SPECIES_TABLE)
 
 # Cold start: garante que o modelo está disponível localmente antes da primeira invocação
 download_speciesnet_from_s3(
@@ -162,6 +173,107 @@ def _group_to_appearance(
     }
 
 
+# ── Catálogo de espécies (auto, SIAB-189) ─────────────────────────────────────
+
+
+def _slugify_species(name: str) -> str:
+    """species_id a partir do nome científico que o SpeciesNet devolve —
+    mesma normalização de _slugify_species_name em backend/api.py, duplicada
+    aqui porque pipeline/ e backend/ são imagens Docker separadas (builds a
+    partir de contextos diferentes), sem módulo Python compartilhado entre
+    as duas."""
+    slug = name.strip().lower()
+    slug = re.sub(r"\s+", "-", slug)
+    slug = re.sub(r"[^a-z0-9-]", "", slug)
+    return slug
+
+
+def _gbif_species_match(name: str) -> dict | None:
+    """GET /species/match do GBIF. Diferente de _gbif_species_exists
+    (backend/api.py, que usa /species/search pra nome livre/PT digitado por
+    humano), aqui o input já é sempre um binomial científico bem formado
+    (o que o SpeciesNet devolve) — /match é determinístico (1 resultado),
+    /search é fuzzy/ranqueado.
+
+    Retorna None em falha de rede — chamador não grava nada, tenta de novo
+    na próxima vez que a espécie aparecer (mesmo padrão de
+    _query_gbif_occurrence_br em gbif_allowlist_sync.py).
+    """
+    params = urllib.parse.urlencode({"name": name})
+    url = f"{GBIF_SPECIES_MATCH_URL}?{params}"
+    try:
+        with urllib.request.urlopen(url, timeout=GBIF_TIMEOUT_SECONDS) as resp:
+            return json.loads(resp.read())
+    except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as exc:
+        logger.warning("Falha ao consultar GBIF /species/match para '%s': %s", name, exc)
+        return None
+
+
+def _ensure_species_from_ai(species: str, s3_client=None) -> None:
+    """Cadastra `species` em siab-species com status="auto" na primeira vez
+    que o SpeciesNet a classifica no nível "species" (SIAB-189) — sem isso,
+    a busca de correção no /review só encontra espécies que passaram por
+    "+ Nova espécie" manual, nunca as que a IA já viu de verdade.
+
+    Cache-first: se species_id já existe (auto/pending/official/rejected),
+    não consulta o GBIF de novo — só a primeira aparição de cada espécie
+    nova custa uma chamada de rede (get_item é O(1), muito mais barato que
+    o roundtrip ao GBIF).
+
+    status="auto" (não "pending") porque já passou por validação automática
+    (GBIF /species/match confirma que é um táxon real de nível espécie, +
+    allowlist BR confirma ocorrência no Brasil — mesma allowlist do
+    geo_review_flag, SIAB-187) — não precisa entrar na fila de aprovação
+    humana (/especies-pendentes), só fica visível na busca até alguém
+    decidir promover pra "official" ou não. Espécie sem ocorrência
+    confirmada no Brasil (ou allowlist ainda sem essa espécie) não é
+    auto-cadastrada — mesmo default seguro do geo_review_flag: ausência de
+    confirmação positiva não vira cadastro automático.
+
+    Falha do GBIF (rede) ou do DynamoDB nunca propaga — só loga e segue,
+    sem travar o pipeline por causa do catálogo.
+    """
+    species_id = _slugify_species(species)
+    if not species_id:
+        return
+
+    try:
+        existing = _species.get_item(Key={"species_id": species_id}).get("Item")
+    except Exception as exc:
+        logger.warning("_ensure_species_from_ai: falha ao consultar %s: %s", species_id, exc)
+        return
+    if existing:
+        return
+
+    match = _gbif_species_match(species)
+    if not match or match.get("rank") != "SPECIES":
+        return
+
+    allowlist = _get_gbif_allowlist(BUCKET, s3_client=s3_client)
+    entry = allowlist.get(species.strip().lower())
+    occurs_in_br = bool(entry) and entry.get("ocorre_br", False) and \
+        entry.get("n_registros_gbif", 0) >= GBIF_MIN_OCCURRENCE_RECORDS
+    if not occurs_in_br:
+        return
+
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    item = {
+        "species_id": species_id,
+        "name":       match.get("canonicalName") or species,
+        "status":     "auto",
+        "gbif_key":   match.get("usageKey"),
+        "created_by": "speciesnet-pipeline",
+        "created_at": now,
+    }
+    try:
+        _species.put_item(Item=item, ConditionExpression="attribute_not_exists(species_id)")
+        logger.info("Espécie auto-cadastrada em siab-species: %s", species_id)
+    except _species.meta.client.exceptions.ConditionalCheckFailedException:
+        pass  # corrida entre invocações concorrentes — outra já criou, tudo bem
+    except Exception as exc:
+        logger.warning("_ensure_species_from_ai: falha ao gravar %s: %s", species_id, exc)
+
+
 # ── Persistência por frame ────────────────────────────────────────────────────
 
 
@@ -169,6 +281,7 @@ def _write_frame_annotations(
     classifications: list,
     tenant_id: str,
     video_id: str,
+    s3_client=None,
 ) -> None:
     """Persiste classificação AI de cada frame em siab-frame-annotations.
 
@@ -191,6 +304,12 @@ def _write_frame_annotations(
         current_best = best_by_frame.get(frame_idx)
         if current_best is None or c.species_score > current_best.species_score:
             best_by_frame[frame_idx] = c
+
+    # SIAB-189: espécies já vistas nesta chamada não precisam de uma segunda
+    # checagem em siab-species — _ensure_species_from_ai já faz cache-first
+    # via get_item, mas dedupe aqui evita N leituras repetidas na mesma
+    # invocação pra um vídeo com dezenas de frames da mesma espécie.
+    species_checked: set[str] = set()
 
     for frame_idx, c in best_by_frame.items():
         # species/genus/family/order/class já são os valores corretos do
@@ -224,6 +343,10 @@ def _write_frame_annotations(
                 ":geo_review_flag": c.geo_review_flag,
             },
         )
+
+        if taxonomic_level == "species" and c.species not in species_checked:
+            species_checked.add(c.species)
+            _ensure_species_from_ai(c.species, s3_client=s3_client)
 
 
 # ── Gravação no DynamoDB ──────────────────────────────────────────────────────
@@ -334,7 +457,7 @@ def lambda_handler(event, context):
             country=COUNTRY,
         )
 
-        _write_frame_annotations(classifications, tenant_id=tenant_id, video_id=video_id)
+        _write_frame_annotations(classifications, tenant_id=tenant_id, video_id=video_id, s3_client=s3)
 
         appearances = gap_track(
             classifications,

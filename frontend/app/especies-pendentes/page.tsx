@@ -140,7 +140,7 @@ export default function EspeciesPendentesPage() {
           <div className="flex flex-col items-center justify-center py-20 gap-2"
             style={{ color: "#9A9080", fontFamily: "IBM Plex Sans, sans-serif" }}>
             <ListChecks size={32} style={{ opacity: 0.3 }} />
-            <p style={{ fontSize: 14 }}>Nenhuma categoria aguardando aprovação.</p>
+            <p style={{ fontSize: 14 }}>Nenhuma espécie aguardando aprovação.</p>
           </div>
         )}
 
@@ -232,7 +232,7 @@ export default function EspeciesPendentesPage() {
 
         {!loading && items.length > 0 && (
           <div style={{ fontSize: 12, color: "#9A9080", fontFamily: "IBM Plex Sans, sans-serif" }}>
-            {items.length} categoria{items.length !== 1 ? "s" : ""} aguardando decisão
+            {items.length} espécie{items.length !== 1 ? "s" : ""} aguardando decisão
           </div>
         )}
 

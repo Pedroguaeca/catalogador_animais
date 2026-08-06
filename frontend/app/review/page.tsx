@@ -25,6 +25,7 @@ interface ApiVideoItem {
 interface ApiSpeciesItem {
   species_id: string;
   name:       string;
+  status?:    string;
 }
 
 interface ApiFrameItem {
@@ -144,7 +145,7 @@ function ReviewPageDataLoader() {
         const speciesData = await speciesRes.json();
         const items: ApiSpeciesItem[] = speciesData.species ?? [];
         if (!cancelled) {
-          setCategories(items.map((s) => ({ id: s.species_id, name: s.name })));
+          setCategories(items.map((s) => ({ id: s.species_id, name: s.name, status: s.status })));
           setCategoriesError(null);
         }
       } catch (e) {

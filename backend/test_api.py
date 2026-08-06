@@ -1529,6 +1529,44 @@ class TestSpeciesCatalog(unittest.TestCase):
         names = [s["name"] for s in resp.json()["species"]]
         self.assertEqual(names, ["Paca"])
 
+    def test_list_species_includes_auto(self):
+        """SIAB-189: espécie auto-cadastrada pelo pipeline (_ensure_species_from_ai)
+        aparece na busca do /review sem esperar aprovação humana."""
+        self.table._store["paca"] = {"species_id": "paca", "name": "Paca", "status": "official"}
+        self.table._store["eira-barbara"] = {"species_id": "eira-barbara", "name": "Eira barbara", "status": "auto"}
+        resp = client.get("/species")
+        self.assertEqual(resp.status_code, 200)
+        names = sorted(s["name"] for s in resp.json()["species"])
+        self.assertEqual(names, ["Eira barbara", "Paca"])
+
+    def test_list_species_excludes_pending_and_rejected_even_mixed_with_auto(self):
+        self.table._store["paca"] = {"species_id": "paca", "name": "Paca", "status": "official"}
+        self.table._store["eira-barbara"] = {"species_id": "eira-barbara", "name": "Eira barbara", "status": "auto"}
+        self.table._store["novaespecie"] = {"species_id": "novaespecie", "name": "Nova Espécie", "status": "pending"}
+        self.table._store["rejeitada"] = {"species_id": "rejeitada", "name": "Rejeitada", "status": "rejected"}
+        resp = client.get("/species")
+        names = sorted(s["name"] for s in resp.json()["species"])
+        self.assertEqual(names, ["Eira barbara", "Paca"])
+
+    def test_list_species_auto_only_no_official_yet(self):
+        """Projeto sem nenhuma espécie oficial ainda — busca não deve
+        depender de haver pelo menos uma "official" pra funcionar."""
+        self.table._store["eira-barbara"] = {"species_id": "eira-barbara", "name": "Eira barbara", "status": "auto"}
+        resp = client.get("/species")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["count"], 1)
+
+    def test_list_species_sorted_by_name_across_statuses(self):
+        """Ordenação por nome acontece depois do merge official+auto — não
+        pode sair em dois blocos separados (todos os official, depois todos
+        os auto), tem que intercalar por ordem alfabética real."""
+        self.table._store["zebra"]  = {"species_id": "zebra",  "name": "Zebra",  "status": "official"}
+        self.table._store["arara"]  = {"species_id": "arara",  "name": "Arara",  "status": "auto"}
+        self.table._store["macaco"] = {"species_id": "macaco", "name": "Macaco", "status": "official"}
+        resp = client.get("/species")
+        names = [s["name"] for s in resp.json()["species"]]
+        self.assertEqual(names, ["Arara", "Macaco", "Zebra"])
+
     def test_list_species_is_public_no_auth_header(self):
         self.table._store["paca"] = {"species_id": "paca", "name": "Paca", "status": "official"}
         c = TestClient(app)  # sem Authorization nenhum

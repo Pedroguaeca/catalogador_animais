@@ -48,6 +48,9 @@ export interface Video {
 export interface Category {
   id: string;
   name: string; // Portuguese name
+  // "auto" = auto-cadastrada pelo pipeline a partir da IA (SIAB-189), ainda
+  // sem curadoria humana — undefined/"official" tratado igual (sem selo).
+  status?: string;
 }
 
 export type ReviewAction =

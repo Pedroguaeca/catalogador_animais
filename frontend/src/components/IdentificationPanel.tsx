@@ -548,21 +548,31 @@ export function IdentificationPanel({
                 className="text-sm font-medium underline transition-colors"
                 style={{ color: "#2F6B4F", ...font }}
               >
-                Criar nova categoria
+                Criar nova espécie
               </button>
             </div>
           ) : (
             <div className="grid grid-cols-2 gap-2">
               {filtered.map((cat) => {
                 const isSelected = selected === cat.id;
+                // SIAB-189: "auto" veio do pipeline (IA + GBIF), ainda sem
+                // curadoria humana — mesma borda tracejada já usada pro
+                // botão "+ Nova espécie" abaixo, pra sinalizar "ainda não
+                // oficial" com o mesmo vocabulário visual do resto do app.
+                const isAuto = !isSelected && cat.status === "auto";
                 return (
                   <button
                     key={cat.id}
                     onClick={() => onSelect(cat.id)}
+                    title={isAuto ? "Sugerida pela IA — ainda não avaliada por um humano" : undefined}
                     className="flex items-center justify-between gap-1 text-left transition-colors"
                     style={{
                       padding: "9px 11px", borderRadius: 10,
-                      border: isSelected ? "1.5px solid #2F6B4F" : "1.5px solid #E7DECF",
+                      border: isSelected
+                        ? "1.5px solid #2F6B4F"
+                        : isAuto
+                        ? "1.5px dashed #C3BAA8"
+                        : "1.5px solid #E7DECF",
                       background: isSelected ? "#2F6B4F" : "#fff",
                       color: isSelected ? "#fff" : "#221F1A",
                       fontWeight: isSelected ? 600 : 500, fontSize: 13, ...font, overflow: "hidden",
@@ -626,7 +636,7 @@ export function IdentificationPanel({
                 (e.currentTarget as HTMLElement).style.color = "#6B6357";
               }}
             >
-              + Nova categoria
+              + Nova espécie
             </button>
           )}
         </div>

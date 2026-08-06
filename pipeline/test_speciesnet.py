@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import uuid
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
 import PIL.Image
@@ -21,8 +22,10 @@ from pipeline.speciesnet import (
     classify_species,
 )
 from pipeline.speciesnet_handler import (
+    _ensure_species_from_ai,
     _frame_index,
     _group_to_appearance,
+    _slugify_species,
     _write_appearance,
     _write_frame_annotations,
     gap_track,
@@ -906,7 +909,8 @@ class TestWriteFrameAnnotations:
         }
 
         cls = make_frame_cls(species="didelphidae", score=0.99, level="family", frame_num=1)
-        with patch("pipeline.speciesnet_handler._frame_anns", fake_table):
+        with patch("pipeline.speciesnet_handler._frame_anns", fake_table), \
+             patch("pipeline.speciesnet_handler._ensure_species_from_ai"):
             _write_frame_annotations([cls], tenant_id="t1", video_id="v1")
 
         item = fake_table.items[pk]
@@ -924,7 +928,8 @@ class TestWriteFrameAnnotations:
         fake_table = _FakeFrameAnnotationsTable()
         cls = make_frame_cls(species="dasyprocta leporina", score=0.87, level="species", frame_num=2)
 
-        with patch("pipeline.speciesnet_handler._frame_anns", fake_table):
+        with patch("pipeline.speciesnet_handler._frame_anns", fake_table), \
+             patch("pipeline.speciesnet_handler._ensure_species_from_ai"):
             _write_frame_annotations([cls], tenant_id="t1", video_id="v1")
 
         item = fake_table.items[("t1", "v1#00002")]
@@ -938,7 +943,8 @@ class TestWriteFrameAnnotations:
         com AttributeError."""
         fake_table = _FakeFrameAnnotationsTable()
         cls = make_frame_cls(frame_num=3)
-        with patch("pipeline.speciesnet_handler._frame_anns", fake_table):
+        with patch("pipeline.speciesnet_handler._frame_anns", fake_table), \
+             patch("pipeline.speciesnet_handler._ensure_species_from_ai"):
             _write_frame_annotations([cls], tenant_id="t1", video_id="v1")
         assert ("t1", "v1#00003") in fake_table.items
 
@@ -948,7 +954,259 @@ class TestWriteFrameAnnotations:
         de update_item já coberta acima)."""
         fake_table = _FakeFrameAnnotationsTable()
         cls = make_frame_cls(species="penelope purpurascens", level="species", frame_num=4, geo_review_flag=True)
-        with patch("pipeline.speciesnet_handler._frame_anns", fake_table):
+        with patch("pipeline.speciesnet_handler._frame_anns", fake_table), \
+             patch("pipeline.speciesnet_handler._ensure_species_from_ai"):
             _write_frame_annotations([cls], tenant_id="t1", video_id="v1")
         item = fake_table.items[("t1", "v1#00004")]
         assert item["geo_review_flag"] is True
+
+
+# ── _ensure_species_from_ai (SIAB-189) ──────────────────────────────────────────
+
+
+class _FakeConditionalCheckFailedException(Exception):
+    pass
+
+
+class _FakeSpeciesTable:
+    """Fake mínima de siab-species: get_item + put_item condicional, o
+    suficiente pra testar _ensure_species_from_ai sem AWS real. Espelha a
+    forma real do boto3 Table (.meta.client.exceptions.*) pro código de
+    produção conseguir capturar ConditionalCheckFailedException sem saber
+    que está rodando contra um fake. Classes auxiliares em nível de módulo
+    (não aninhadas) porque um corpo de classe não enxerga o namespace de
+    uma classe irmã definida no mesmo corpo.
+    """
+
+    meta = SimpleNamespace(
+        client=SimpleNamespace(
+            exceptions=SimpleNamespace(
+                ConditionalCheckFailedException=_FakeConditionalCheckFailedException,
+            )
+        )
+    )
+
+    def __init__(self, existing: dict | None = None):
+        self.items: dict[str, dict] = dict(existing or {})
+
+    def get_item(self, Key):
+        item = self.items.get(Key["species_id"])
+        return {"Item": item} if item else {}
+
+    def put_item(self, Item, ConditionExpression=None):
+        species_id = Item["species_id"]
+        if species_id in self.items:
+            raise _FakeConditionalCheckFailedException()
+        self.items[species_id] = Item
+
+
+def make_gbif_match(rank="SPECIES", canonical="Eira barbara", key=2433716, match_type="EXACT"):
+    return {
+        "usageKey": key,
+        "scientificName": f"{canonical} (Linnaeus, 1758)",
+        "canonicalName": canonical,
+        "rank": rank,
+        "matchType": match_type,
+        "confidence": 99,
+    }
+
+
+def make_br_allowlist(species: str, ocorre_br=True, n_registros=100):
+    return {species: {"ocorre_br": ocorre_br, "n_registros_gbif": n_registros}}
+
+
+class TestEnsureSpeciesFromAi:
+    """SIAB-189: auto-cadastro de espécie em siab-species na primeira vez
+    que o SpeciesNet a classifica no nível "species", sem esperar aprovação
+    manual pra aparecer na busca."""
+
+    def test_creates_entry_when_species_valid_and_occurs_in_br(self):
+        table = _FakeSpeciesTable()
+        with patch("pipeline.speciesnet_handler._species", table), \
+             patch("pipeline.speciesnet_handler._gbif_species_match",
+                   return_value=make_gbif_match()) as match, \
+             patch("pipeline.speciesnet_handler._get_gbif_allowlist",
+                   return_value=make_br_allowlist("eira barbara")):
+            _ensure_species_from_ai("eira barbara")
+
+        match.assert_called_once_with("eira barbara")
+        item = table.items["eira-barbara"]
+        assert item["status"] == "auto"
+        assert item["name"] == "Eira barbara"
+        assert item["gbif_key"] == 2433716
+        assert item["created_by"] == "speciesnet-pipeline"
+
+    def test_cache_hit_skips_gbif_entirely(self):
+        """species_id já em siab-species (qualquer status) — não consulta o
+        GBIF de novo, custe o que custar o status."""
+        table = _FakeSpeciesTable(existing={"eira-barbara": {"species_id": "eira-barbara", "status": "official"}})
+        with patch("pipeline.speciesnet_handler._species", table), \
+             patch("pipeline.speciesnet_handler._gbif_species_match") as match:
+            _ensure_species_from_ai("eira barbara")
+
+        match.assert_not_called()
+
+    def test_non_species_rank_not_created(self):
+        """GBIF /match resolve mammalia/aves/etc num rank acima de espécie
+        (CLASS/FAMILY/ORDER) sem dar matchType=NONE — precisa filtrar por
+        rank explicitamente, não só por presença de match."""
+        table = _FakeSpeciesTable()
+        with patch("pipeline.speciesnet_handler._species", table), \
+             patch("pipeline.speciesnet_handler._gbif_species_match",
+                   return_value=make_gbif_match(rank="CLASS", canonical="Mammalia")), \
+             patch("pipeline.speciesnet_handler._get_gbif_allowlist",
+                   return_value=make_br_allowlist("mammalia")):
+            _ensure_species_from_ai("mammalia")
+
+        assert table.items == {}
+
+    def test_no_gbif_match_not_created(self):
+        """'blank' e afins: GBIF retorna matchType=NONE — sem usageKey."""
+        table = _FakeSpeciesTable()
+        no_match = {"matchType": "NONE", "confidence": 100}
+        with patch("pipeline.speciesnet_handler._species", table), \
+             patch("pipeline.speciesnet_handler._gbif_species_match", return_value=no_match):
+            _ensure_species_from_ai("blank")
+
+        assert table.items == {}
+
+    def test_gbif_network_failure_not_created_and_does_not_raise(self):
+        table = _FakeSpeciesTable()
+        with patch("pipeline.speciesnet_handler._species", table), \
+             patch("pipeline.speciesnet_handler._gbif_species_match", return_value=None):
+            _ensure_species_from_ai("eira barbara")  # não deve levantar
+
+        assert table.items == {}
+
+    def test_species_absent_from_allowlist_not_created(self):
+        """Espécie ainda não sincronizada na allowlist BR — mesmo default
+        seguro do geo_review_flag: ausência não vira confirmação positiva."""
+        table = _FakeSpeciesTable()
+        with patch("pipeline.speciesnet_handler._species", table), \
+             patch("pipeline.speciesnet_handler._gbif_species_match",
+                   return_value=make_gbif_match()), \
+             patch("pipeline.speciesnet_handler._get_gbif_allowlist", return_value={}):
+            _ensure_species_from_ai("eira barbara")
+
+        assert table.items == {}
+
+    def test_species_not_occurring_in_br_not_created(self):
+        table = _FakeSpeciesTable()
+        with patch("pipeline.speciesnet_handler._species", table), \
+             patch("pipeline.speciesnet_handler._gbif_species_match",
+                   return_value=make_gbif_match()), \
+             patch("pipeline.speciesnet_handler._get_gbif_allowlist",
+                   return_value=make_br_allowlist("eira barbara", ocorre_br=False)):
+            _ensure_species_from_ai("eira barbara")
+
+        assert table.items == {}
+
+    def test_species_below_occurrence_threshold_not_created(self):
+        """Achado 28/07 (SIAB-187): ocorre_br=True com poucos registros não
+        conta como confirmação real — mesmo limiar (GBIF_MIN_OCCURRENCE_RECORDS)."""
+        table = _FakeSpeciesTable()
+        with patch("pipeline.speciesnet_handler._species", table), \
+             patch("pipeline.speciesnet_handler._gbif_species_match",
+                   return_value=make_gbif_match()), \
+             patch("pipeline.speciesnet_handler._get_gbif_allowlist",
+                   return_value=make_br_allowlist("eira barbara", ocorre_br=True, n_registros=3)):
+            _ensure_species_from_ai("eira barbara")
+
+        assert table.items == {}
+
+    def test_concurrent_write_race_does_not_raise(self):
+        """Duas invocações concorrentes veem "não existe" via get_item ao
+        mesmo tempo — a segunda esbarra no ConditionExpression do put_item e
+        deve engolir a exceção, não propagar."""
+        table = _FakeSpeciesTable()
+
+        def put_item_races(Item, ConditionExpression=None):
+            # simula outra invocação já tendo criado entre o get_item e o put_item
+            raise _FakeConditionalCheckFailedException()
+
+        table.put_item = put_item_races
+
+        with patch("pipeline.speciesnet_handler._species", table), \
+             patch("pipeline.speciesnet_handler._gbif_species_match",
+                   return_value=make_gbif_match()), \
+             patch("pipeline.speciesnet_handler._get_gbif_allowlist",
+                   return_value=make_br_allowlist("eira barbara")):
+            _ensure_species_from_ai("eira barbara")  # não deve levantar
+
+    def test_dynamodb_get_item_failure_does_not_raise(self):
+        table = MagicMock()
+        table.get_item.side_effect = Exception("boom")
+        with patch("pipeline.speciesnet_handler._species", table), \
+             patch("pipeline.speciesnet_handler._gbif_species_match") as match:
+            _ensure_species_from_ai("eira barbara")  # não deve levantar
+
+        match.assert_not_called()
+
+
+class TestSlugifySpecies:
+    def test_binomial_name(self):
+        assert _slugify_species("Eira barbara") == "eira-barbara"
+
+    def test_already_lowercase(self):
+        assert _slugify_species("eira barbara") == "eira-barbara"
+
+    def test_strips_whitespace(self):
+        assert _slugify_species("  eira barbara  ") == "eira-barbara"
+
+
+class TestWriteFrameAnnotationsSpeciesCatalog:
+    """SIAB-189: _write_frame_annotations aciona _ensure_species_from_ai só
+    pra frames de nível "species", uma vez por espécie distinta no batch."""
+
+    def test_species_level_frame_triggers_helper(self):
+        fake_table = _FakeFrameAnnotationsTable()
+        cls = make_frame_cls(species="dasyprocta leporina", level="species", frame_num=1)
+        with patch("pipeline.speciesnet_handler._frame_anns", fake_table), \
+             patch("pipeline.speciesnet_handler._ensure_species_from_ai") as ensure:
+            _write_frame_annotations([cls], tenant_id="t1", video_id="v1")
+
+        ensure.assert_called_once_with("dasyprocta leporina", s3_client=None)
+
+    def test_non_species_level_frame_does_not_trigger_helper(self):
+        fake_table = _FakeFrameAnnotationsTable()
+        cls = make_frame_cls(species="didelphidae", level="family", frame_num=1)
+        with patch("pipeline.speciesnet_handler._frame_anns", fake_table), \
+             patch("pipeline.speciesnet_handler._ensure_species_from_ai") as ensure:
+            _write_frame_annotations([cls], tenant_id="t1", video_id="v1")
+
+        ensure.assert_not_called()
+
+    def test_same_species_across_frames_calls_helper_once(self):
+        fake_table = _FakeFrameAnnotationsTable()
+        classifications = [
+            make_frame_cls(species="dasyprocta leporina", level="species", frame_num=1),
+            make_frame_cls(species="dasyprocta leporina", level="species", frame_num=2),
+            make_frame_cls(species="dasyprocta leporina", level="species", frame_num=3),
+        ]
+        with patch("pipeline.speciesnet_handler._frame_anns", fake_table), \
+             patch("pipeline.speciesnet_handler._ensure_species_from_ai") as ensure:
+            _write_frame_annotations(classifications, tenant_id="t1", video_id="v1")
+
+        assert ensure.call_count == 1
+
+    def test_different_species_each_call_helper(self):
+        fake_table = _FakeFrameAnnotationsTable()
+        classifications = [
+            make_frame_cls(species="dasyprocta leporina", level="species", frame_num=1),
+            make_frame_cls(species="eira barbara", level="species", frame_num=2),
+        ]
+        with patch("pipeline.speciesnet_handler._frame_anns", fake_table), \
+             patch("pipeline.speciesnet_handler._ensure_species_from_ai") as ensure:
+            _write_frame_annotations(classifications, tenant_id="t1", video_id="v1")
+
+        assert ensure.call_count == 2
+
+    def test_s3_client_threaded_through(self):
+        fake_table = _FakeFrameAnnotationsTable()
+        cls = make_frame_cls(species="dasyprocta leporina", level="species", frame_num=1)
+        sentinel_s3 = object()
+        with patch("pipeline.speciesnet_handler._frame_anns", fake_table), \
+             patch("pipeline.speciesnet_handler._ensure_species_from_ai") as ensure:
+            _write_frame_annotations([cls], tenant_id="t1", video_id="v1", s3_client=sentinel_s3)
+
+        ensure.assert_called_once_with("dasyprocta leporina", s3_client=sentinel_s3)
