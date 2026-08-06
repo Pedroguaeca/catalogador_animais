@@ -4,7 +4,7 @@
 import path from "path";
 import fs from "fs";
 import { parse } from "csv-parse/sync";
-import type { Video } from "./types";
+import type { Video, Category } from "./types";
 
 // Em Docker, DATA_ROOT aponta para o volume compartilhado (/data).
 // Em dev local, sobe um nível a partir de frontend/.
@@ -25,6 +25,18 @@ function loadGenusMap(): Record<string, { pt: string; en: string }> {
   return Object.fromEntries(
     Object.entries(raw).filter(([k]) => !k.startsWith("_"))
   ) as Record<string, { pt: string; en: string }>;
+}
+
+// SIAB-106: a página local (/, sem backend) chamava ReviewPage com
+// categories=[] fixo — a busca de "Não é isso? Corrigir" nunca encontrava
+// nenhuma espécie (mesmo espécies já catalogadas em genus_map.json), forçando
+// sempre a criação de uma categoria nova duplicada. Deriva o catálogo local a
+// partir do genus_map.json (mesma fonte usada pra traduzir genus_pt acima).
+export function loadCategories(): Category[] {
+  const genusMap = loadGenusMap();
+  return Object.entries(genusMap)
+    .map(([genus, { pt }]) => ({ id: genus, name: pt }))
+    .sort((a, b) => a.name.localeCompare(b.name, "pt"));
 }
 
 export function loadVideos(): Video[] {

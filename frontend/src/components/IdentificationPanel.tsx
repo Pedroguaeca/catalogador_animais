@@ -485,7 +485,14 @@ export function IdentificationPanel({
       <Divider />
 
       {/* ── 6. Busca de espécie (única área flexível/rolável) ──────────── */}
-      <div className="flex-1 flex flex-col min-h-0">
+      {/* SIAB-106: com muitas seções shrink-0 acima (ações, novo evento, nav de
+          frame, metadados) e mais duas abaixo (nav de vídeo), esta era a única
+          área flex-1 do painel — em alturas de viewport comuns (~720px) ela
+          ficava espremida a poucos pixels, tornando os resultados da busca
+          praticamente invisíveis mesmo com correspondências reais. minHeight
+          garante espaço pra caixa de busca + ~2 linhas de resultado; o
+          overflowY:auto do card inteiro (acima) assume o resto do scroll. */}
+      <div className="flex-1 flex flex-col min-h-0" style={{ minHeight: 220 }}>
         <div className="px-3 pt-2.5 pb-2 shrink-0">
           <div className="relative">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: "#9A9080" }} />

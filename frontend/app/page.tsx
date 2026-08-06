@@ -1,9 +1,10 @@
 import { ReviewPage } from "../src/components/ReviewPage";
 import { SiabNav } from "../src/components/SiabNav";
-import { loadVideos } from "../src/lib/data";
+import { loadVideos, loadCategories } from "../src/lib/data";
 
 export default function Home() {
   const videos = loadVideos();
+  const categories = loadCategories();
 
   if (videos.length === 0) {
     return (
@@ -30,7 +31,7 @@ export default function Home() {
   return (
     <div className="flex flex-col h-screen overflow-hidden">
       <SiabNav />
-      <ReviewPage videos={videos} categories={[]} />
+      <ReviewPage videos={videos} categories={categories} />
     </div>
   );
 }
