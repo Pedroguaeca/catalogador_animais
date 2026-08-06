@@ -386,6 +386,184 @@ class TestClassifySpeciesGeofence:
         assert result[0].species == "didelphis virginiana"
 
 
+class TestClassifySpeciesConfidenceRollup:
+    """SIAB-14/199 — rollup por confiança (decisão de produto final 05/08/2026):
+
+    1. Teto de rollup = família — nunca sobe até ordem/classe/reino.
+    2. NUNCA suprime um palpite de espécie que o modelo já ofereceu, mesmo com
+       confiança baixa — só cai pra família quando não sobra candidato de
+       espécie nenhum (que passe geofencing).
+    3. Sem threshold de confiança fixo/configurável.
+
+    Casos reais que motivaram a decisão: mamífero a 47% de confiança (não pode
+    ser suprimido) e o quero-quero (Vanellus chilensis) que só vinha "aves".
+    """
+
+    # Candidato top-1: só "aves" (nível classe) — quero-quero real, achado 29/07.
+    AVES_ONLY = "uuid0;aves;;;;;bird"
+    # Dois gêneros diferentes dentro de Charadriidae, nenhum sozinho no topo,
+    # mas cuja soma acumulada em família é maior que qualquer outro bucket —
+    # é isso que o combiner nativo consegue enxergar e o geofence sozinho não.
+    CHARADRIIFORMES_GENUS_VANELLUS = (
+        "uuid1;aves;charadriiformes;charadriidae;vanellus;;lapwing genus"
+    )
+    CHARADRIIFORMES_GENUS_PLUVIALIS = (
+        "uuid2;aves;charadriiformes;charadriidae;pluvialis;;plover genus"
+    )
+    CHARADRIIDAE_FAMILY = (
+        "uuid3;aves;charadriiformes;charadriidae;;;lapwings and allies"
+    )
+    # Espécie real, de baixíssima confiança, presente entre os candidatos.
+    VANELLUS_CHILENSIS = (
+        "uuid4;aves;charadriiformes;charadriidae;vanellus;chilensis;southern lapwing"
+    )
+
+    MAMMAL_SPECIES = "abc;mammalia;rodentia;dasyproctidae;dasyprocta;leporina;agouti"
+
+    def _mock_model(self, labels, scores):
+        mock_model = MagicMock()
+        mock_model.classifier.preprocess.return_value = "preprocessed"
+        mock_model.classifier.predict.return_value = {
+            "classifications": {"classes": labels, "scores": scores},
+            "model_version": "speciesnet-v5.0.5",
+        }
+        return mock_model
+
+    def _mock_ensemble(self, taxonomy_map=None, geofence_map=None):
+        mock_ensemble = MagicMock()
+        mock_ensemble.taxonomy_map = taxonomy_map or {}
+        mock_ensemble.geofence_map = geofence_map or {}
+        return mock_ensemble
+
+    def _run(self, labels, scores, taxonomy_map=None, geofence_map=None, tmp_path=None):
+        dets = [make_det(1)]
+
+        def fake_download(bucket, key, local_path):
+            _write_dummy_jpeg(local_path)
+
+        mock_s3 = MagicMock()
+        mock_s3.download_file.side_effect = fake_download
+        mock_model = self._mock_model(labels, scores)
+        mock_ensemble = self._mock_ensemble(taxonomy_map, geofence_map)
+
+        with patch("pipeline.speciesnet._get_model", return_value=mock_model), \
+             patch("pipeline.speciesnet._get_ensemble", return_value=mock_ensemble), \
+             patch("pipeline.speciesnet.boto3.client", return_value=mock_s3):
+            result = classify_species(dets, "t1", country="BRA")
+        return result
+
+    def test_low_confidence_mammal_species_never_suppressed(self, tmp_path):
+        """Caso real 1: mamífero identificado a 47% de confiança continua
+        aparecendo como espécie — não pode ser suprimido por esse fix."""
+        result = self._run([self.MAMMAL_SPECIES], [0.47], tmp_path=tmp_path)
+        assert result[0].species == "dasyprocta leporina"
+        assert result[0].taxonomic_level == "species"
+        assert result[0].species_score == pytest.approx(0.47)
+
+    def test_aves_only_top1_rolls_up_to_family_via_ensemble(self, tmp_path):
+        """Caso real 2: quero-quero. Top-1 bruto do classifier é só "aves"
+        (classe), mas os candidatos de nível inferior (dois gêneros dentro de
+        Charadriidae) acumulam massa suficiente pro combiner nativo resolver
+        em família — antes do fix, ficava só em "aves"/classe."""
+        taxonomy_map = {
+            "aves;charadriiformes;charadriidae;;": self.CHARADRIIDAE_FAMILY,
+        }
+        result = self._run(
+            labels=[self.AVES_ONLY, self.CHARADRIIFORMES_GENUS_VANELLUS, self.CHARADRIIFORMES_GENUS_PLUVIALIS],
+            scores=[0.55, 0.10, 0.08],
+            taxonomy_map=taxonomy_map,
+            tmp_path=tmp_path,
+        )
+        assert result[0].species == "charadriidae"
+        assert result[0].taxonomic_level == "family"
+        assert result[0].species_score == pytest.approx(0.18)  # 0.10 + 0.08
+
+    def test_aves_only_top1_with_no_lower_level_signal_stays_at_class(self, tmp_path):
+        """Se não há candidato nenhum com genus/family preenchido (limite real
+        do modelo pra essa espécie, não bug do rollup), o resultado continua
+        no nível que o classifier realmente ofereceu — não inventa família."""
+        result = self._run(
+            labels=[self.AVES_ONLY],
+            scores=[0.55],
+            taxonomy_map={},
+            tmp_path=tmp_path,
+        )
+        assert result[0].species == "aves"
+        assert result[0].taxonomic_level == "class"
+
+    def test_low_confidence_species_candidate_beats_family_rollup(self, tmp_path):
+        """Se existe QUALQUER candidato de nível espécie na lista completa
+        (mesmo de confiança baixíssima, rank inferior ao top-1 "aves"), ele
+        vence o rollup por família — nunca suprime um palpite de espécie."""
+        taxonomy_map = {
+            "aves;charadriiformes;charadriidae;;": self.CHARADRIIDAE_FAMILY,
+        }
+        result = self._run(
+            labels=[self.AVES_ONLY, self.VANELLUS_CHILENSIS],
+            scores=[0.55, 0.03],
+            taxonomy_map=taxonomy_map,
+            tmp_path=tmp_path,
+        )
+        assert result[0].species == "vanellus chilensis"
+        assert result[0].taxonomic_level == "species"
+        assert result[0].species_score == pytest.approx(0.03)
+
+    def test_rollup_never_exceeds_family_ceiling(self, tmp_path):
+        """Teto de rollup = família (decisão de produto). Só há sinal em nível
+        "order" (charadriiformes) na taxonomy_map — sem entrada de família —
+        então o rollup não deve inventar um nível acima de família; como não
+        consegue nem família, mantém o "aves" bruto em vez de subir pra ordem."""
+        order_label = "uuid5;aves;charadriiformes;;;;plovers and allies"
+        taxonomy_map = {
+            # só ancestor de ORDEM disponível — nunca usado pelo rollup, que
+            # é capado em ["genus", "family"].
+            "aves;charadriiformes;;;": order_label,
+        }
+        result = self._run(
+            labels=[self.AVES_ONLY, self.CHARADRIIFORMES_GENUS_VANELLUS],
+            scores=[0.55, 0.10],
+            taxonomy_map=taxonomy_map,
+            tmp_path=tmp_path,
+        )
+        # Sem entrada de família na taxonomy_map, o rollup capado em
+        # ["genus", "family"] não encontra nada — permanece no "aves" bruto,
+        # nunca sobe pra "order" mesmo que a taxonomy_map tivesse esse dado.
+        assert result[0].taxonomic_level == "class"
+        assert result[0].species == "aves"
+
+    def test_geofenced_species_falls_back_to_alternate_species_candidate(self, tmp_path):
+        """Espécie top-1 geofenced (implausível pro país) não derruba direto
+        pra família se existe OUTRO candidato de espécie válido na lista —
+        nunca suprime um palpite de espécie que sobrevive ao geofencing."""
+        implausible = (
+            "uuid6;mammalia;didelphimorphia;didelphidae;didelphis;virginiana;virginia opossum"
+        )
+        plausible_alt = (
+            "uuid7;mammalia;didelphimorphia;didelphidae;didelphis;marsupialis;common opossum"
+        )
+        family_rollup = "uuid8;mammalia;didelphimorphia;didelphidae;;;possum family"
+        # Precisa existir pra o geofence embutido conseguir rolar a espécie
+        # implausível pra família antes do nosso passo de rollup por
+        # confiança entrar em ação (senão o geofence sozinho falha o rollup
+        # e retorna "unknown", que não é um nível elegível pro fallback).
+        taxonomy_map = {
+            "mammalia;didelphimorphia;didelphidae;;": family_rollup,
+        }
+        geofence_map = {
+            "mammalia;didelphimorphia;didelphidae;didelphis;virginiana": {"allow": {"USA": []}},
+        }
+        result = self._run(
+            labels=[implausible, plausible_alt],
+            scores=[0.9, 0.2],
+            taxonomy_map=taxonomy_map,
+            geofence_map=geofence_map,
+            tmp_path=tmp_path,
+        )
+        assert result[0].species == "didelphis marsupialis"
+        assert result[0].taxonomic_level == "species"
+        assert result[0].species_score == pytest.approx(0.2)
+
+
 class TestClassifySpeciesGbifAllowlist:
     """Entrega (b) do geofencing (SIAB-187): camada GBIF depois do geofence
     embutido. Só sinaliza (geo_review_flag) — nunca troca species/score."""

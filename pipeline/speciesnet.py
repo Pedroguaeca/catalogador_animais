@@ -127,6 +127,34 @@ class Classification:
 # ── Parsing de label ──────────────────────────────────────────────────────────
 
 
+def _first_valid_species_candidate(
+    labels: list[str],
+    scores: list[float],
+    country: str | None,
+    geofence_map: dict,
+) -> tuple[str, float] | None:
+    """Procura, em TODOS os candidatos retornados pelo classifier (não só o
+    top-1), o primeiro que resolve a nível "species" e não é geograficamente
+    implausível.
+
+    Rollup por confiança (SIAB-14, decisão de produto final 05/08/2026):
+    nunca suprime um palpite de espécie que o modelo já ofereceu, mesmo com
+    score baixíssimo — só deixa o rollup taxonômico agir quando não sobra
+    candidato de espécie nenhum (que passe geofencing).
+    """
+    from speciesnet.geofence_utils import should_geofence_animal_classification
+
+    for label, score in zip(labels, scores):
+        if _parse_label(label)[1] != "species":
+            continue
+        if should_geofence_animal_classification(
+            label, country, None, geofence_map, True,
+        ):
+            continue
+        return label, float(score)
+    return None
+
+
 def _parse_label(label: str) -> tuple[str, str, str]:
     """Converte um label SpeciesNet em (species_name, taxonomic_level, taxonomic_path).
 
@@ -269,7 +297,10 @@ def classify_species(
 
     # Imports adiados (pesados)
     import PIL.Image
-    from speciesnet.geofence_utils import geofence_animal_classification
+    from speciesnet.geofence_utils import (
+        geofence_animal_classification,
+        roll_up_labels_to_first_matching_level,
+    )
     from speciesnet.utils import BBox
 
     tmpdir = tempfile.mkdtemp(prefix="sn_", dir="/tmp")
@@ -335,6 +366,40 @@ def classify_species(
                     geofence_map=ensemble.geofence_map,
                     enable_geofence=True,
                 )
+
+                # Rollup por confiança (SIAB-14/199, decisão de produto final
+                # 05/08/2026). geofence_animal_classification() só rebaixa a
+                # espécie por implausibilidade geográfica — nunca por baixa
+                # confiança isolada. Se o resultado não chegou a nível
+                # "species" mas É um nível taxonômico de animal (genus/family/
+                # order/class — nunca mexe em blank/animal/human/vehicle/
+                # unknown), decide o que fazer:
+                #   1. NUNCA suprime um palpite de espécie que o modelo já
+                #      ofereceu em algum candidato (mesmo com score baixo) —
+                #      procura entre TODOS os candidatos, não só o top-1.
+                #   2. Só usa o rollup taxonômico quando não sobra candidato
+                #      de espécie nenhum (que passe geofencing) — e mesmo
+                #      assim, teto = família. Nunca ordem/classe/reino.
+                if _parse_label(label)[1] in ("genus", "family", "order", "class"):
+                    species_candidate = _first_valid_species_candidate(
+                        labels, scores, country, ensemble.geofence_map,
+                    )
+                    if species_candidate is not None:
+                        label, score = species_candidate
+                    else:
+                        rollup = roll_up_labels_to_first_matching_level(
+                            labels=labels,
+                            scores=scores,
+                            country=country,
+                            admin1_region=None,
+                            target_taxonomy_levels=["genus", "family"],
+                            non_blank_threshold=0.0,
+                            taxonomy_map=ensemble.taxonomy_map,
+                            geofence_map=ensemble.geofence_map,
+                            enable_geofence=True,
+                        )
+                        if rollup:
+                            label, score, _source = rollup
             else:
                 label, score = labels[0], float(scores[0])
 
