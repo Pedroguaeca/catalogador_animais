@@ -90,6 +90,8 @@ export function loadVideos(): Video[] {
 
       const framePath  = row["frame"] ?? "";
       const video_uuid = framePath.split("/")[0] ?? "";
+      const status = (clsConf >= 0.3 ? "detection" : clsConf > 0 ? "review" : "empty") as
+        "detection" | "review" | "empty";
 
       return {
         idx: i + 1,
@@ -104,8 +106,17 @@ export function loadVideos(): Video[] {
             ? { genus, genus_pt: genusPt, det_conf: detConf, cls_conf: clsConf,
                 bbox: [x1, y1, x2, y2] as [number, number, number, number] }
             : null,
-        status: (clsConf >= 0.3 ? "detection" : clsConf > 0 ? "review" : "empty") as
-          "detection" | "review" | "empty",
+        status,
+        // SIAB-26: reducer.ts (preAnnotatedSpecies) só semeia annotatedFrames/
+        // annotatedSpecies quando status="detection" VEM acompanhado do nome
+        // da espécie — contrato que a página /review (API) sempre cumpre, mas
+        // esta página local nunca preenchia. Sem annotatedSpecies,
+        // computeSegments() (ReviewPage.tsx) não formava nenhum segmento pra
+        // esses frames — "Registros do vídeo" nunca aparecia, e com ele a
+        // única leitura de individual_count agregado por aparição sumia
+        // inteira nesta rota, mesmo com o stepper por frame funcionando.
+        annotatedSpecies: status === "detection" ? genusPt : undefined,
+        annotationSource: status === "detection" ? "auto" : undefined,
       };
     });
 
