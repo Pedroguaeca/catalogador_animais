@@ -96,6 +96,14 @@ class InfraStack(Stack):
             **_common,
         )
 
+        clients = ddb.Table(
+            self, "SiabClients",
+            table_name="siab-clients",
+            partition_key=ddb.Attribute(name="tenant_id", type=ddb.AttributeType.STRING),
+            sort_key=    ddb.Attribute(name="client_id",  type=ddb.AttributeType.STRING),
+            **_common,
+        )
+
         videos_table = ddb.Table(
             self, "SiabVideos",
             table_name="siab-videos",
@@ -428,12 +436,14 @@ class InfraStack(Stack):
                 "INVITES_TABLE":            invites.table_name,
                 "VIDEOS_TABLE":             videos_table.table_name,
                 "SPECIES_TABLE":            species.table_name,
+                "PROJECTS_TABLE":           projects.table_name,
+                "CLIENTS_TABLE":            clients.table_name,
             },
         )
 
         # IAM — API Lambda precisa ler/escrever S3 + todas as tabelas DDB + SQS
         media_bucket.grant_read_write(api_fn)
-        for table in [appearances, reviews, frame_annotations, projects, videos_table, cameras, species, invites]:
+        for table in [appearances, reviews, frame_annotations, projects, clients, videos_table, cameras, species, invites]:
             table.grant_read_write_data(api_fn)
         videos_queue.grant_send_messages(api_fn)
 

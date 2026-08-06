@@ -89,6 +89,14 @@ def _videos_tbl_mock(tenant_id: str = TENANT_ID) -> MagicMock:
     return m
 
 
+def _projects_tbl_mock(tenant_id: str = TENANT_ID, project_id: str = "proj-001") -> MagicMock:
+    """SIAB-150: generate_upload_url agora valida que project_id existe
+    (_project_exists) antes de gravar o vídeo."""
+    m = MagicMock()
+    m.query.return_value = {"Items": [{"tenant_id": tenant_id, "project_id": project_id}]}
+    return m
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # POST /projects/{project_id}/videos/upload-url — auth + tenant isolation
 # POST /projects/{project_id}/videos/{video_id}/confirm — auth + tenant isolation
@@ -124,10 +132,12 @@ class TestUploadVideoAuth(unittest.TestCase):
     def test_upload_url_s3_key_uses_jwt_tenant(self):
         """O s3_key retornado usa o tenant_id do JWT, não parâmetro da URL."""
         tenant_b_token = make_jwt(tenant_id="outro-tenant")
-        tbl = _videos_tbl_mock("outro-tenant")
-        s3  = _s3_mock()
-        with patch("backend.api._s3_client",    return_value=s3), \
-             patch("backend.api._videos_table", return_value=tbl):
+        tbl  = _videos_tbl_mock("outro-tenant")
+        proj = _projects_tbl_mock("outro-tenant")
+        s3   = _s3_mock()
+        with patch("backend.api._s3_client",      return_value=s3), \
+             patch("backend.api._videos_table",   return_value=tbl), \
+             patch("backend.api._projects_table", return_value=proj):
             resp = client.post(
                 "/projects/proj-001/videos/upload-url",
                 json={"filename": "vid.avi", "content_type": "video/x-msvideo"},
@@ -142,10 +152,12 @@ class TestUploadVideoAuth(unittest.TestCase):
     def test_upload_url_dynamodb_record_uses_jwt_tenant(self):
         """O registro gravado em siab-videos usa tenant_id do JWT."""
         tenant_b_token = make_jwt(tenant_id="outro-tenant")
-        tbl = _videos_tbl_mock("outro-tenant")
-        s3  = _s3_mock()
-        with patch("backend.api._s3_client",    return_value=s3), \
-             patch("backend.api._videos_table", return_value=tbl):
+        tbl  = _videos_tbl_mock("outro-tenant")
+        proj = _projects_tbl_mock("outro-tenant")
+        s3   = _s3_mock()
+        with patch("backend.api._s3_client",      return_value=s3), \
+             patch("backend.api._videos_table",   return_value=tbl), \
+             patch("backend.api._projects_table", return_value=proj):
             client.post(
                 "/projects/proj-001/videos/upload-url",
                 json={"filename": "v.avi"},

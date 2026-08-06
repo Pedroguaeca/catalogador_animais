@@ -12,6 +12,10 @@ Endpoints:
     PATCH  /frames/individual-count                       — define quantidade de indivíduos num frame específico
     GET    /projects/{project_id}/videos/{video_id}/segments — resumo dos segmentos (espécie/faixa/indivíduos) do vídeo
     PATCH  /appearances/individual-count                  — consolida indivíduos + filhote de uma aparição confirmada (checkout)
+    POST   /clients                                        — cria cliente (client_id gerado)
+    GET    /clients                                        — lista clientes do tenant
+    POST   /projects                                       — cria projeto sob um cliente (project_id gerado, valida estado/bioma)
+    GET    /projects                                       — lista projetos do tenant
 
 Mudança de comportamento (upload):
     Antes: frontend enviava o vídeo no corpo da requisição → API fazia OCR síncrono e retornava
@@ -34,6 +38,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime, timezone
+from enum import Enum
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -58,6 +63,8 @@ FRAME_ANNOTATIONS_TABLE = os.environ.get("FRAME_ANNOTATIONS_TABLE",  "siab-frame
 CAMERAS_TABLE           = os.environ.get("CAMERAS_TABLE",            "siab-cameras")
 VIDEOS_TABLE            = os.environ.get("VIDEOS_TABLE",             "siab-videos")
 SPECIES_TABLE           = os.environ.get("SPECIES_TABLE",            "siab-species")
+PROJECTS_TABLE          = os.environ.get("PROJECTS_TABLE",           "siab-projects")
+CLIENTS_TABLE           = os.environ.get("CLIENTS_TABLE",            "siab-clients")
 VIDEOS_QUEUE_NAME       = os.environ.get("VIDEOS_QUEUE_NAME",        "siab-videos")
 AWS_REGION              = os.environ.get("AWS_DEFAULT_REGION",       "us-east-1")
 
@@ -126,6 +133,26 @@ def _videos_table():
 
 def _species_table():
     return boto3.resource("dynamodb", region_name=AWS_REGION).Table(SPECIES_TABLE)
+
+
+def _projects_table():
+    return boto3.resource("dynamodb", region_name=AWS_REGION).Table(PROJECTS_TABLE)
+
+
+def _clients_table():
+    return boto3.resource("dynamodb", region_name=AWS_REGION).Table(CLIENTS_TABLE)
+
+
+def _project_exists(tenant_id: str, project_id: str) -> bool:
+    """Checa existência de project_id sem conhecer o client_id (SK de
+    siab-projects é client_id#project_id) — Query por tenant_id + filtro
+    pelo atributo project_id solto que create_project também grava."""
+    resp = _projects_table().query(
+        KeyConditionExpression=Key("tenant_id").eq(tenant_id),
+        FilterExpression=Attr("project_id").eq(project_id),
+        Limit=1,
+    )
+    return len(resp.get("Items", [])) > 0
 
 
 def _slugify_species_name(name: str) -> str:
@@ -231,6 +258,39 @@ class CameraUpdate(BaseModel):
     name:      str | None = None
     latitude:  float | None = None
     longitude: float | None = None
+
+
+class UF(str, Enum):
+    """27 UFs do Brasil — whitelist no backend (mesmo padrão de bug do
+    grupo_fauna/nível_taxonômico de espécie: dropdown do frontend sozinho
+    não impede payload inválido direto na API)."""
+    AC = "AC"; AL = "AL"; AP = "AP"; AM = "AM"; BA = "BA"; CE = "CE"; DF = "DF"
+    ES = "ES"; GO = "GO"; MA = "MA"; MT = "MT"; MS = "MS"; MG = "MG"; PA = "PA"
+    PB = "PB"; PR = "PR"; PE = "PE"; PI = "PI"; RJ = "RJ"; RN = "RN"; RS = "RS"
+    RO = "RO"; RR = "RR"; SC = "SC"; SP = "SP"; SE = "SE"; TO = "TO"
+
+
+class Bioma(str, Enum):
+    """6 biomas oficiais do Brasil (IBGE)."""
+    AMAZONIA       = "Amazônia"
+    CAATINGA       = "Caatinga"
+    CERRADO        = "Cerrado"
+    MATA_ATLANTICA = "Mata Atlântica"
+    PAMPA          = "Pampa"
+    PANTANAL       = "Pantanal"
+
+
+class ClientCreate(BaseModel):
+    nome: str
+
+
+class ProjectCreate(BaseModel):
+    client_id:        str
+    nome:              str
+    estado:            UF
+    bioma:             Bioma
+    data:              str | None = None
+    nome_area_estudo:  str | None = None
 
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
@@ -809,6 +869,9 @@ def generate_upload_url(
         2. Frontend faz PUT direto ao S3 usando upload_url (sem Authorization header — a URL já está assinada)
         3. Frontend chama POST /projects/{id}/videos/{video_id}/confirm para disparar o pipeline
     """
+    if not _project_exists(tenant_id, project_id):
+        raise HTTPException(status_code=422, detail=f"project_id '{project_id}' não existe.")
+
     video_id = str(uuid.uuid4())
     ext      = os.path.splitext(body.filename)[1].lower() or ".avi"
     s3_key   = f"{tenant_id}/videos/{video_id}{ext}"
@@ -1031,6 +1094,103 @@ def update_camera(
 
     resp = tbl.update_item(**kwargs)
     return _clean(resp.get("Attributes", {}))
+
+
+# ── Endpoints — Clientes e Projetos (SIAB-150, Fase 1: núcleo de dados) ──────
+#
+# Frontend ainda não usa nada disso (seletor de projeto é Fase 2) — só o
+# núcleo de dados: client_id é sempre gerado no backend (nunca o nome
+# digitado), estado/bioma são whitelist (ver classes UF/Bioma acima).
+
+
+@app.post("/clients", status_code=201)
+def create_client(
+    body:      ClientCreate,
+    tenant_id: str = Depends(get_current_tenant),
+):
+    """Cria um cliente. client_id é gerado (uuid4), nunca o nome digitado."""
+    nome = body.nome.strip()
+    if not nome:
+        raise HTTPException(status_code=422, detail="nome não pode ser vazio.")
+
+    client_id = str(uuid.uuid4())
+    item = {
+        "tenant_id":  tenant_id,
+        "client_id":  client_id,
+        "nome":       nome,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _clients_table().put_item(Item=item)
+    return _clean(item)
+
+
+@app.get("/clients")
+def list_clients(tenant_id: str = Depends(get_current_tenant)):
+    """Lista clientes do tenant."""
+    items: list[dict] = []
+    kwargs: dict = {"KeyConditionExpression": Key("tenant_id").eq(tenant_id)}
+    tbl = _clients_table()
+    while True:
+        resp = tbl.query(**kwargs)
+        items.extend(resp.get("Items", []))
+        lek = resp.get("LastEvaluatedKey")
+        if not lek:
+            break
+        kwargs["ExclusiveStartKey"] = lek
+    return {"count": len(items), "items": _clean(items)}
+
+
+@app.post("/projects", status_code=201)
+def create_project(
+    body:      ProjectCreate,
+    tenant_id: str = Depends(get_current_tenant),
+):
+    """Cria um projeto sob um cliente existente. project_id é gerado (uuid4).
+    404 se client_id não existir — projeto sempre pertence a um cliente real."""
+    client = _clients_table().get_item(
+        Key={"tenant_id": tenant_id, "client_id": body.client_id}
+    ).get("Item")
+    if not client:
+        raise HTTPException(status_code=404, detail=f"client_id '{body.client_id}' não encontrado.")
+
+    nome = body.nome.strip()
+    if not nome:
+        raise HTTPException(status_code=422, detail="nome não pode ser vazio.")
+
+    project_id = str(uuid.uuid4())
+    item = {
+        "tenant_id":             tenant_id,
+        "client_id#project_id":  f"{body.client_id}#{project_id}",
+        "client_id":             body.client_id,
+        "project_id":            project_id,
+        "nome":                  nome,
+        "estado":                body.estado.value,
+        "bioma":                 body.bioma.value,
+        "created_at":            datetime.now(timezone.utc).isoformat(),
+    }
+    if body.data:
+        item["data"] = body.data
+    if body.nome_area_estudo:
+        item["nome_area_estudo"] = body.nome_area_estudo.strip()
+
+    _projects_table().put_item(Item=item)
+    return _clean(item)
+
+
+@app.get("/projects")
+def list_projects(tenant_id: str = Depends(get_current_tenant)):
+    """Lista projetos do tenant (todos os clientes)."""
+    items: list[dict] = []
+    kwargs: dict = {"KeyConditionExpression": Key("tenant_id").eq(tenant_id)}
+    tbl = _projects_table()
+    while True:
+        resp = tbl.query(**kwargs)
+        items.extend(resp.get("Items", []))
+        lek = resp.get("LastEvaluatedKey")
+        if not lek:
+            break
+        kwargs["ExclusiveStartKey"] = lek
+    return {"count": len(items), "items": _clean(items)}
 
 
 # ── Endpoint 5 — Listar aparições ─────────────────────────────────────────────

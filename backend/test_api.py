@@ -161,12 +161,21 @@ class TestUploadVideo(unittest.TestCase):
         m.update_item.return_value = {}
         return m
 
-    def test_upload_url_returns_video_id_and_presigned_url(self):
-        s3  = self._s3_mock()
-        tbl = self._videos_tbl_mock()
+    def _projects_tbl_mock(self, project_id="proj-001"):
+        """SIAB-150: generate_upload_url agora valida que project_id existe
+        (_project_exists) antes de gravar o vídeo."""
+        m = MagicMock()
+        m.query.return_value = {"Items": [{"tenant_id": TENANT_ID, "project_id": project_id}]}
+        return m
 
-        with patch("backend.api._s3_client",     return_value=s3), \
-             patch("backend.api._videos_table",  return_value=tbl):
+    def test_upload_url_returns_video_id_and_presigned_url(self):
+        s3   = self._s3_mock()
+        tbl  = self._videos_tbl_mock()
+        proj = self._projects_tbl_mock()
+
+        with patch("backend.api._s3_client",      return_value=s3), \
+             patch("backend.api._videos_table",   return_value=tbl), \
+             patch("backend.api._projects_table", return_value=proj):
             resp = client.post(
                 "/projects/proj-001/videos/upload-url",
                 json={"filename": "DSCF0007.avi", "content_type": "video/x-msvideo"},
@@ -181,11 +190,13 @@ class TestUploadVideo(unittest.TestCase):
         self.assertTrue(body["s3_key"].endswith(".avi"))
 
     def test_upload_url_creates_pending_record_in_dynamodb(self):
-        s3  = self._s3_mock()
-        tbl = self._videos_tbl_mock()
+        s3   = self._s3_mock()
+        tbl  = self._videos_tbl_mock()
+        proj = self._projects_tbl_mock()
 
-        with patch("backend.api._s3_client",    return_value=s3), \
-             patch("backend.api._videos_table", return_value=tbl):
+        with patch("backend.api._s3_client",      return_value=s3), \
+             patch("backend.api._videos_table",   return_value=tbl), \
+             patch("backend.api._projects_table", return_value=proj):
             client.post(
                 "/projects/proj-001/videos/upload-url",
                 json={"filename": "test.avi", "content_type": "video/x-msvideo"},
