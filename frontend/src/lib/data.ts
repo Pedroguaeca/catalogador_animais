@@ -38,19 +38,32 @@ export function loadVideos(): Video[] {
     skip_empty_lines: true,
   });
 
-  // Agrupa por vídeo; para cada vídeo, acumula frames únicos (pelo path)
+  // Agrupa por vídeo; para cada vídeo, acumula frames únicos pelo índice real
+  // do frame (coluna "timestamp (frame)"), não pelo path da imagem.
+  //
+  // SIAB-166: o MegaDetector pode gerar mais de uma detecção candidata para o
+  // mesmo frame do vídeo (ex: "Dasyprocta" 99.9% + "Unknown" 22.8% no mesmo
+  // frame 105) — o CSV grava cada candidata em uma linha própria, com um path
+  // de imagem diferente por categoria (dasyprocta/..._0105.jpg vs
+  // unknown/..._0105.jpg). Agrupar pelo path (como antes) tratava essas
+  // linhas como frames distintos, inflando a lista e exibindo a detecção
+  // fraca/deslocada como se fosse um frame novo com bbox errada. Mantém só a
+  // de maior cls_conf por frame — mesmo critério já usado no pipeline AWS
+  // (ver best_by_frame em pipeline/speciesnet_handler.py).
   const byVideo: Record<string, Map<string, Record<string, string>>> = {};
   for (const row of rows) {
     const vid = row["video"] ?? "unknown";
     if (!byVideo[vid]) byVideo[vid] = new Map();
-    const fp = row["frame"] ?? "";
-    if (fp && !byVideo[vid].has(fp)) {
-      byVideo[vid].set(fp, row);
+    const frameIdx = row["timestamp (frame)"] ?? "";
+    if (!frameIdx) continue;
+    const current = byVideo[vid].get(frameIdx);
+    if (!current || parseFloat(row["cls_conf"] ?? "0") > parseFloat(current["cls_conf"] ?? "0")) {
+      byVideo[vid].set(frameIdx, row);
     }
   }
 
   return Object.entries(byVideo).map(([videoId, frameMap]) => {
-    const frames = Array.from(frameMap.entries()).map(([framePath, row], i) => {
+    const frames = Array.from(frameMap.values()).map((row, i) => {
       const genus    = row["genero"]   ?? "Unknown";
       const genusPt  = genusMap[genus]?.pt ?? row["genero_pt"] ?? genus;
       const detConf  = parseFloat(row["det_conf"] ?? "0");
@@ -63,6 +76,7 @@ export function loadVideos(): Video[] {
       const time = row["hora"] ?? "";
       const dateFmt = date ? date.split("-").reverse().join("-") : "";
 
+      const framePath  = row["frame"] ?? "";
       const video_uuid = framePath.split("/")[0] ?? "";
 
       return {
