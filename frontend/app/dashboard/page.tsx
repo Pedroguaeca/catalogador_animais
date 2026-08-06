@@ -12,7 +12,9 @@ import type { StatsData } from "./DashboardCharts";
 const INDEPENDENT_RECORD_INFO =
   "Um registro independente é contado por vídeo — a mesma espécie em vídeos diferentes (mesmo do mesmo dia ou câmera) conta como registros separados. Ainda não há uma janela de tempo entre vídeos consecutivos.";
 
-const PROJECT_ID = "projeto-junho-2026";
+// HOTFIX: ver review/page.tsx — mesmo hardcode do slug antigo, mesma causa
+// da tela vazia em produção. Temporário até SIAB-221/222.
+const PROJECT_ID = "8ea7e076-3dc9-4fd9-be29-1193dfecceae";
 
 const DashboardCharts = dynamic<{ stats: StatsData | null }>(
   () => import("./DashboardCharts"),

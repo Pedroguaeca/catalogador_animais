@@ -8,7 +8,9 @@ import { FilterRail, type ChipCount, type Filters } from "./FilterRail";
 import { VideoCard } from "./VideoCard";
 import { SidePanel } from "./SidePanel";
 
-const PROJECT_ID = "projeto-junho-2026";
+// HOTFIX: ver app/review/page.tsx — mesmo hardcode do slug antigo, mesma
+// causa da tela vazia em produção. Temporário até SIAB-221/222.
+const PROJECT_ID = "8ea7e076-3dc9-4fd9-be29-1193dfecceae";
 
 const DEFAULT_FILTERS: Filters = {
   cameraId: null, species: null, minConfidence: 0, semDeteccaoOnly: false,

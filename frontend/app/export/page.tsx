@@ -6,7 +6,9 @@ import { useSession } from "next-auth/react";
 import { SiabNav } from "../../src/components/SiabNav";
 import { API_BASE, apiHeaders } from "../../src/lib/api";
 
-const PROJECTS  = ["projeto-junho-2026"];
+// HOTFIX: ver review/page.tsx — mesmo hardcode do slug antigo, mesma causa
+// da tela vazia em produção. Temporário até SIAB-221/222.
+const PROJECTS  = ["8ea7e076-3dc9-4fd9-be29-1193dfecceae"];
 
 type ExportState = "idle" | "loading" | "done" | "error";
 

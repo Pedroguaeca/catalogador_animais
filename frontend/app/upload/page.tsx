@@ -8,7 +8,9 @@ import { getSession } from "next-auth/react";
 import { SiabNav } from "../../src/components/SiabNav";
 import { API_BASE } from "../../src/lib/api";
 
-const PROJECTS = ["projeto-junho-2026"];
+// HOTFIX: ver app/review/page.tsx - mesmo hardcode do slug antigo, mesma
+// causa da tela vazia em producao. Temporario ate SIAB-221/222.
+const PROJECTS = ["8ea7e076-3dc9-4fd9-be29-1193dfecceae"];
 const ACCEPT   = ".avi,.mp4,.mov,.mkv";
 
 interface UploadResult {

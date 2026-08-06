@@ -9,7 +9,12 @@ import { ReviewPage } from "../../src/components/ReviewPage";
 import { API_BASE, apiHeaders } from "../../src/lib/api";
 import type { Video, Frame, Category } from "../../src/lib/types";
 
-const PROJECT_ID = "projeto-junho-2026";
+// HOTFIX: projeto migrou de "projeto-junho-2026" pro UUID real em 24/07 — o
+// frontend deployado ficou apontando pro slug antigo, que não tem nenhum
+// vídeo em siab-videos, e /review passou a mostrar 0 vídeos em produção.
+// Isso é hardcode temporário — SIAB-221/222 removem PROJECT_ID fixo de vez
+// (seletor de projeto real).
+const PROJECT_ID = "8ea7e076-3dc9-4fd9-be29-1193dfecceae";
 
 interface ApiVideoItem {
   video_id:          string;

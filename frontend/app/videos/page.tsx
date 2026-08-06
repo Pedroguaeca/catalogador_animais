@@ -7,7 +7,9 @@ import { VideosPage } from "../../src/components/videos/VideosPage";
 import { API_BASE, apiHeaders } from "../../src/lib/api";
 import type { VideoItem } from "../../src/lib/videoTypes";
 
-const PROJECT_ID = "projeto-junho-2026";
+// HOTFIX: ver review/page.tsx — mesmo hardcode do slug antigo, mesma causa
+// da tela vazia em produção. Temporário até SIAB-221/222.
+const PROJECT_ID = "8ea7e076-3dc9-4fd9-be29-1193dfecceae";
 
 export default function Videos() {
   const { data: session } = useSession();
