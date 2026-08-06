@@ -40,6 +40,18 @@ function fuzzyMatch(name: string, query: string): boolean {
   return nName.split(/[\s-]+/).some((word) => levenshtein(nQuery, word) <= threshold);
 }
 
+// SIAB-118: o selo "conf. X%" e a barra de progresso eram sempre verdes,
+// mesmo numa detecção de 15% — o revisor não tinha nenhum sinal visual de
+// que aquela sugestão merecia mais atenção. Mesmos limiares de bboxColor()
+// em FrameStage.tsx (>=50% confiante, >=30% incerto, abaixo disso baixa
+// confiança), só que na paleta de aviso já usada no painel (categoriesError
+// usa #B0793A/AlertTriangle, UploadModal usa #C2503A pra erro).
+function confidenceColor(pct: number): { fg: string; bg: string } {
+  if (pct >= 50) return { fg: "#2D8B5F", bg: "rgba(45,139,95,0.14)" };
+  if (pct >= 30) return { fg: "#B0793A", bg: "rgba(176,121,58,0.14)" };
+  return { fg: "#C2503A", bg: "rgba(194,80,58,0.14)" };
+}
+
 interface IdentificationPanelProps {
   detection: Detection | null;
   categories: Category[];
@@ -222,6 +234,7 @@ export function IdentificationPanel({
   const aiPt = detection?.genus_pt ?? null;
   const aiGenus = detection?.genus ?? null;
   const confidence = detection ? Math.round(detection.cls_conf * 100) : 0;
+  const confColor = confidenceColor(confidence);
 
   // Controles de espécie/metadados (botões, novo evento, filhote/indivíduos)
   // aparecem quando há detecção da IA OU quando o frame já foi confirmado
@@ -281,9 +294,10 @@ export function IdentificationPanel({
             ) : (
               detection && (
                 <span
-                  className="text-xs font-semibold px-2 py-0.5 rounded-full"
-                  style={{ background: "rgba(45,139,95,0.14)", color: "#2D8B5F" }}
+                  className="flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full"
+                  style={{ background: confColor.bg, color: confColor.fg }}
                 >
+                  {confidence < 30 && <AlertTriangle size={11} />}
                   conf. {confidence}%
                 </span>
               )
@@ -330,7 +344,7 @@ export function IdentificationPanel({
                 </p>
               </div>
               <div className="rounded-full overflow-hidden" style={{ height: 5, background: "#CDE3D6" }}>
-                <div className="h-full rounded-full" style={{ width: `${confidence}%`, background: "#2D8B5F" }} />
+                <div className="h-full rounded-full" style={{ width: `${confidence}%`, background: confColor.fg }} />
               </div>
               {/* Linha de taxonomia: sem dado disponível hoje (taxonomic_path
                   não é persistido por frame — mesma lacuna do GBIF/nome_popular
