@@ -392,6 +392,10 @@ class InfraStack(Stack):
         media_bucket.grant_read(speciesnet_fn)
         appearances.grant_write_data(speciesnet_fn)
         frame_annotations.grant_write_data(speciesnet_fn)
+        # _ensure_species_from_ai (SIAB-189): read pro cache-check via
+        # get_item antes de decidir se chama o GBIF, write pro put_item
+        # condicional que auto-cadastra a espécie com status="auto".
+        species.grant_read_write_data(speciesnet_fn)
 
         # ── Event Source Mappings (SQS → Lambda) ─────────────────────────────
         ingester_fn.add_event_source(
