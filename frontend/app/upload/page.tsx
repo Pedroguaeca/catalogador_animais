@@ -2,16 +2,16 @@
 
 import { useCallback, useRef, useState } from "react";
 import {
-  UploadCloud, CheckCircle2, XCircle, Loader2, Clock, X,
+  UploadCloud, CheckCircle2, XCircle, Loader2, Clock, X, FolderPlus,
 } from "lucide-react";
-import { getSession } from "next-auth/react";
+import { getSession, useSession } from "next-auth/react";
 import { SiabNav } from "../../src/components/SiabNav";
+import { ProjectSelector } from "../../src/components/ProjectSelector";
+import { CreateProjectForm } from "../../src/components/CreateProjectForm";
 import { API_BASE } from "../../src/lib/api";
+import { useProjectsAndClients, clientName } from "../../src/lib/projectTypes";
 
-// HOTFIX: ver app/review/page.tsx - mesmo hardcode do slug antigo, mesma
-// causa da tela vazia em producao. Temporario ate SIAB-221/222.
-const PROJECTS = ["8ea7e076-3dc9-4fd9-be29-1193dfecceae"];
-const ACCEPT   = ".avi,.mp4,.mov,.mkv";
+const ACCEPT = ".avi,.mp4,.mov,.mkv";
 
 interface UploadResult {
   video_id: string;
@@ -76,8 +76,21 @@ function reportUploadFailed(
 
 export default function UploadPage() {
   const inputRef = useRef<HTMLInputElement>(null);
+  const { data: session } = useSession();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const idToken = (session as any)?.idToken as string | undefined;
 
-  const [project,  setProject]  = useState(PROJECTS[0]);
+  // SIAB-222: nenhum vídeo pode ser solto antes de um projeto existir —
+  // projectId vazio é o "portão" que esconde a zona de drag-and-drop.
+  // reloadKey força um refetch de /projects e /clients depois de criar um
+  // projeto/cliente novo — servidor continua sendo a fonte de verdade,
+  // mas o gate já fecha otimisticamente (setProject abaixo) sem esperar.
+  const [reloadKey, setReloadKey] = useState(0);
+  const { projects, clients, loading: loadingProjects, error: projectsError } = useProjectsAndClients(idToken, reloadKey);
+
+  const [project,         setProject]         = useState("");
+  const [creatingProject, setCreatingProject] = useState(false);
+
   const [items,    setItems]    = useState<FileItem[]>([]);
   const [dragging, setDragging] = useState(false);
   const [running,  setRunning]  = useState(false);
@@ -210,26 +223,85 @@ export default function UploadPage() {
           </p>
         </div>
 
-        {/* Card principal */}
+        {/* SIAB-222: portão — sem projeto selecionado/criado, a zona de
+            drag-and-drop nem aparece. */}
+        {!project ? (
+          <div
+            className="flex flex-col gap-5 p-6 rounded-2xl bg-white"
+            style={{ border: "1px solid #E7DECF", boxShadow: "0 1px 2px rgba(34,31,26,.04), 0 6px 20px rgba(34,31,26,.05)" }}
+          >
+            {creatingProject ? (
+              <CreateProjectForm
+                idToken={idToken}
+                clients={clients}
+                onCreated={(created) => {
+                  setProject(created.project_id);
+                  setCreatingProject(false);
+                  setReloadKey((k) => k + 1);
+                }}
+                onClientCreated={() => setReloadKey((k) => k + 1)}
+                onCancel={() => setCreatingProject(false)}
+              />
+            ) : (
+              <>
+                <label className="flex flex-col gap-1.5">
+                  <span className="text-xs font-medium" style={{ color: "#6B6357" }}>Projeto</span>
+                  <ProjectSelector
+                    projects={projects}
+                    clients={clients}
+                    value={project}
+                    onChange={setProject}
+                    placeholder={loadingProjects ? "Carregando…" : "Selecionar projeto existente…"}
+                    disabled={loadingProjects && projects.length === 0}
+                  />
+                  {projectsError && (
+                    <span className="text-xs" style={{ color: "#C2503A" }}>{projectsError}</span>
+                  )}
+                </label>
+                <div className="flex items-center gap-2">
+                  <div style={{ flex: 1, height: 1, background: "#E7DECF" }} />
+                  <span className="text-xs" style={{ color: "#9A9080" }}>ou</span>
+                  <div style={{ flex: 1, height: 1, background: "#E7DECF" }} />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCreatingProject(true)}
+                  className="flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-semibold"
+                  style={{ border: "1.5px dashed #C3BAA8", color: "#221F1A" }}
+                >
+                  <FolderPlus size={15} />
+                  Criar novo projeto
+                </button>
+              </>
+            )}
+          </div>
+        ) : (
         <div
           className="flex flex-col gap-5 p-6 rounded-2xl bg-white"
           style={{ border: "1px solid #E7DECF", boxShadow: "0 1px 2px rgba(34,31,26,.04), 0 6px 20px rgba(34,31,26,.05)" }}
         >
-          {/* Projeto */}
-          <label className="flex flex-col gap-1.5">
-            <span className="text-xs font-medium" style={{ color: "#6B6357" }}>Projeto</span>
-            <select
-              value={project}
-              onChange={(e) => setProject(e.target.value)}
-              style={{
-                padding: "8px 12px", borderRadius: 10, fontSize: 13,
-                border: "1.5px solid #E7DECF", background: "#FAF6EE",
-                color: "#221F1A", fontFamily: "IBM Plex Sans, sans-serif",
-              }}
-            >
-              {PROJECTS.map((p) => <option key={p} value={p}>{p}</option>)}
-            </select>
-          </label>
+          {/* Projeto selecionado */}
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <span className="text-xs font-medium block" style={{ color: "#6B6357" }}>Projeto</span>
+              <span className="text-sm font-medium" style={{ color: "#221F1A" }}>
+                {(() => {
+                  const p = projects.find((pr) => pr.project_id === project);
+                  return p ? `${p.nome} — ${clientName(clients, p.client_id)}` : project;
+                })()}
+              </span>
+            </div>
+            {!running && items.length === 0 && (
+              <button
+                type="button"
+                onClick={() => setProject("")}
+                className="text-xs font-medium"
+                style={{ color: "#2F6B4F", textDecoration: "underline" }}
+              >
+                trocar projeto
+              </button>
+            )}
+          </div>
 
           {/* Drop zone */}
           <div
@@ -292,6 +364,7 @@ export default function UploadPage() {
             }
           </button>
         </div>
+        )}
 
         {/* Lista de arquivos */}
         {items.length > 0 && (
