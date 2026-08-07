@@ -17,7 +17,10 @@ interface ProjectSelectorProps {
 }
 
 const DEFAULT_STYLE: CSSProperties = {
-  padding: "8px 12px", borderRadius: 10, fontSize: 13,
+  // padding-right maior que o esquerdo — a seta nativa do <select> desenha
+  // dentro do padding em vez de reservar espaço próprio; com valores iguais
+  // o texto/seta ficam colados na borda direita (achado visual ao vivo).
+  padding: "8px 32px 8px 12px", borderRadius: 10, fontSize: 13,
   border: "1.5px solid #E7DECF", background: "#FAF6EE",
   color: "#221F1A", fontFamily: "IBM Plex Sans, sans-serif",
 };

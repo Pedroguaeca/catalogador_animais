@@ -143,7 +143,7 @@ export function VideosPage({
           clients={clients}
           value={projectId}
           onChange={onProjectChange}
-          style={{ padding: "4px 10px", fontSize: 12, borderRadius: 8 }}
+          style={{ padding: "4px 28px 4px 10px", fontSize: 12, borderRadius: 8 }}
         />
         <div style={{ flex: 1 }} />
         <button
