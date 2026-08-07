@@ -3,14 +3,12 @@
 import { useMemo, useState } from "react";
 import { Film, Loader2, RefreshCw, AlertCircle } from "lucide-react";
 import type { VideoItem } from "../../lib/videoTypes";
+import type { Project, Client } from "../../lib/projectTypes";
 import { StatusTabs, type TabKey } from "./StatusTabs";
 import { FilterRail, type ChipCount, type Filters } from "./FilterRail";
 import { VideoCard } from "./VideoCard";
 import { SidePanel } from "./SidePanel";
-
-// HOTFIX: ver app/review/page.tsx — mesmo hardcode do slug antigo, mesma
-// causa da tela vazia em produção. Temporário até SIAB-221/222.
-const PROJECT_ID = "8ea7e076-3dc9-4fd9-be29-1193dfecceae";
+import { ProjectSelector } from "../ProjectSelector";
 
 const DEFAULT_FILTERS: Filters = {
   cameraId: null, species: null, minConfidence: 0, semDeteccaoOnly: false,
@@ -57,13 +55,20 @@ function countBy(videos: VideoItem[], pick: (v: VideoItem) => string[], none: st
 }
 
 interface VideosPageProps {
-  videos:    VideoItem[];
-  loading:   boolean;
-  error:     string | null;
-  onRefresh: () => void;
+  videos:          VideoItem[];
+  loading:         boolean;
+  error:           string | null;
+  onRefresh:       () => void;
+  projects:        Project[];
+  clients:         Client[];
+  projectId:       string;
+  onProjectChange: (projectId: string) => void;
 }
 
-export function VideosPage({ videos: rawVideos, loading, error, onRefresh }: VideosPageProps) {
+export function VideosPage({
+  videos: rawVideos, loading, error, onRefresh,
+  projects, clients, projectId, onProjectChange,
+}: VideosPageProps) {
   const [activeTab, setActiveTab]           = useState<TabKey>("aguardando");
   const [filters, setFilters]               = useState<Filters>(DEFAULT_FILTERS);
   const [sortOrder, setSortOrder]           = useState<"asc" | "desc">("desc");
@@ -133,12 +138,13 @@ export function VideosPage({ videos: rawVideos, loading, error, onRefresh }: Vid
         <h1 style={{ fontSize: 18, fontWeight: 700, color: "#221F1A", fontFamily: "IBM Plex Sans, sans-serif" }}>
           Vídeos
         </h1>
-        <span style={{
-          fontSize: 12, color: "#9A9080", fontFamily: "IBM Plex Mono, monospace",
-          background: "#EFE8DB", padding: "2px 8px", borderRadius: 6,
-        }}>
-          {PROJECT_ID}
-        </span>
+        <ProjectSelector
+          projects={projects}
+          clients={clients}
+          value={projectId}
+          onChange={onProjectChange}
+          style={{ padding: "4px 10px", fontSize: 12, borderRadius: 8 }}
+        />
         <div style={{ flex: 1 }} />
         <button
           onClick={onRefresh}

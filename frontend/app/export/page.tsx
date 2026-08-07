@@ -1,14 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Download, CheckCircle2, Loader2, AlertCircle } from "lucide-react";
 import { useSession } from "next-auth/react";
 import { SiabNav } from "../../src/components/SiabNav";
+import { ProjectSelector } from "../../src/components/ProjectSelector";
 import { API_BASE, apiHeaders } from "../../src/lib/api";
-
-// HOTFIX: ver review/page.tsx — mesmo hardcode do slug antigo, mesma causa
-// da tela vazia em produção. Temporário até SIAB-221/222.
-const PROJECTS  = ["8ea7e076-3dc9-4fd9-be29-1193dfecceae"];
+import { useProjectsAndClients } from "../../src/lib/projectTypes";
 
 type ExportState = "idle" | "loading" | "done" | "error";
 
@@ -17,7 +15,15 @@ export default function ExportPage() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const idToken = (session as any)?.idToken as string | undefined;
 
-  const [project,     setProject]     = useState(PROJECTS[0]);
+  const { projects, clients, loading: loadingProjects, error: projectsError } = useProjectsAndClients(idToken);
+  const [project, setProject] = useState("");
+
+  // Mesmo comportamento de antes (sempre um projeto pré-selecionado) — só
+  // que agora vindo da lista real em vez de fixo.
+  useEffect(() => {
+    if (!project && projects.length > 0) setProject(projects[0].project_id);
+  }, [projects, project]);
+
   const [exportState, setExportState] = useState<ExportState>("idle");
   const [error,       setError]       = useState<string | null>(null);
   const [filename,    setFilename]    = useState<string | null>(null);
@@ -81,17 +87,16 @@ export default function ExportPage() {
           {/* Projeto */}
           <label className="flex flex-col gap-1.5">
             <span className="text-xs font-medium" style={{ color: "#6B6357" }}>Projeto</span>
-            <select
+            <ProjectSelector
+              projects={projects}
+              clients={clients}
               value={project}
-              onChange={(e) => { setProject(e.target.value); setExportState("idle"); }}
-              style={{
-                padding: "8px 12px", borderRadius: 10, fontSize: 13,
-                border: "1.5px solid #E7DECF", background: "#FAF6EE",
-                color: "#221F1A", fontFamily: "IBM Plex Sans, sans-serif",
-              }}
-            >
-              {PROJECTS.map((p) => <option key={p} value={p}>{p}</option>)}
-            </select>
+              onChange={(id) => { setProject(id); setExportState("idle"); }}
+              disabled={loadingProjects && projects.length === 0}
+            />
+            {projectsError && (
+              <span className="text-xs" style={{ color: "#C2503A" }}>{projectsError}</span>
+            )}
           </label>
 
           {/* Colunas do CSV */}

@@ -5,27 +5,31 @@ import { useSession } from "next-auth/react";
 import { SiabNav } from "../../src/components/SiabNav";
 import { VideosPage } from "../../src/components/videos/VideosPage";
 import { API_BASE, apiHeaders } from "../../src/lib/api";
+import { useProjectsAndClients } from "../../src/lib/projectTypes";
 import type { VideoItem } from "../../src/lib/videoTypes";
-
-// HOTFIX: ver review/page.tsx — mesmo hardcode do slug antigo, mesma causa
-// da tela vazia em produção. Temporário até SIAB-221/222.
-const PROJECT_ID = "8ea7e076-3dc9-4fd9-be29-1193dfecceae";
 
 export default function Videos() {
   const { data: session } = useSession();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const idToken = (session as any)?.idToken as string | undefined;
 
+  const { projects, clients, loading: loadingProjects, error: projectsError } = useProjectsAndClients(idToken);
+  const [projectId, setProjectId] = useState("");
+
+  useEffect(() => {
+    if (!projectId && projects.length > 0) setProjectId(projects[0].project_id);
+  }, [projects, projectId]);
+
   const [videos,  setVideos]  = useState<VideoItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    if (!idToken) return;
+    if (!idToken || !projectId) return;
     setLoading(true);
     setError(null);
     try {
-      const r = await fetch(`${API_BASE}/projects/${PROJECT_ID}/videos`, {
+      const r = await fetch(`${API_BASE}/projects/${projectId}/videos`, {
         headers: apiHeaders(idToken),
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -36,14 +40,23 @@ export default function Videos() {
     } finally {
       setLoading(false);
     }
-  }, [idToken]);
+  }, [idToken, projectId]);
 
   useEffect(() => { load(); }, [load]);
 
   return (
     <div className="flex flex-col min-h-screen" style={{ background: "#F7F3EE" }}>
       <SiabNav />
-      <VideosPage videos={videos} loading={loading} error={error} onRefresh={load} />
+      <VideosPage
+        videos={videos}
+        loading={loading || loadingProjects}
+        error={error ?? projectsError}
+        onRefresh={load}
+        projects={projects}
+        clients={clients}
+        projectId={projectId}
+        onProjectChange={setProjectId}
+      />
     </div>
   );
 }

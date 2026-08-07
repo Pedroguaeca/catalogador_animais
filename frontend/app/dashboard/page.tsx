@@ -5,16 +5,14 @@ import dynamic from "next/dynamic";
 import { useSession } from "next-auth/react";
 import { SiabNav } from "../../src/components/SiabNav";
 import { InfoTooltip } from "../../src/components/InfoTooltip";
-import { API_BASE } from "../../src/lib/api";
+import { ProjectSelector } from "../../src/components/ProjectSelector";
+import { API_BASE, apiHeaders } from "../../src/lib/api";
+import { useProjectsAndClients, clientName } from "../../src/lib/projectTypes";
 import { Camera, AlignJustify, Leaf, Loader2, PawPrint } from "lucide-react";
 import type { StatsData } from "./DashboardCharts";
 
 const INDEPENDENT_RECORD_INFO =
   "Um registro independente é contado por vídeo — a mesma espécie em vídeos diferentes (mesmo do mesmo dia ou câmera) conta como registros separados. Ainda não há uma janela de tempo entre vídeos consecutivos.";
-
-// HOTFIX: ver review/page.tsx — mesmo hardcode do slug antigo, mesma causa
-// da tela vazia em produção. Temporário até SIAB-221/222.
-const PROJECT_ID = "8ea7e076-3dc9-4fd9-be29-1193dfecceae";
 
 const DashboardCharts = dynamic<{ stats: StatsData | null }>(
   () => import("./DashboardCharts"),
@@ -185,25 +183,36 @@ function SpeciesTable({ richness }: { richness: StatsData["species_richness"] })
 
 export default function DashboardPage() {
   const { data: session } = useSession();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const idToken = (session as any)?.idToken as string | undefined;
+
+  const { projects, clients, loading: loadingProjects, error: projectsError } = useProjectsAndClients(idToken);
+  const [projectId, setProjectId] = useState("");
+
+  // Seleciona o primeiro projeto assim que a lista carrega — mantém o
+  // comportamento anterior (sempre mostra dados de algum projeto), só que
+  // agora trocável pelo ProjectSelector em vez de fixo.
+  useEffect(() => {
+    if (!projectId && projects.length > 0) setProjectId(projects[0].project_id);
+  }, [projects, projectId]);
+
   const [stats,   setStats]   = useState<StatsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error,   setError]   = useState<string | null>(null);
 
   useEffect(() => {
-    if (!session) return;
+    if (!idToken || !projectId) return;
+    setLoading(true);
+    setError(null);
 
-    const idToken = (session as unknown as Record<string, unknown>).idToken as string | undefined;
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (idToken) headers["Authorization"] = `Bearer ${idToken}`;
-
-    fetch(`${API_BASE}/projects/${PROJECT_ID}/stats`, { headers })
+    fetch(`${API_BASE}/projects/${projectId}/stats`, { headers: apiHeaders(idToken) })
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json() as Promise<StatsData>;
       })
       .then((data) => { setStats(data); setLoading(false); })
       .catch((err) => { setError(String(err)); setLoading(false); });
-  }, [session]);
+  }, [idToken, projectId]);
 
   // ── Derived values ───────────────────────────────────────────────────────────
   const totalRecords     = stats?.total_confirmed    ?? 0;
@@ -219,6 +228,11 @@ export default function DashboardPage() {
       : "Sem registros"
     : "—";
 
+  const selectedProject = projects.find((p) => p.project_id === projectId) ?? null;
+  const projectLabel = selectedProject
+    ? `${selectedProject.nome} — ${clientName(clients, selectedProject.client_id)}`
+    : "—";
+
   return (
     <div className="min-h-screen" style={{ background: "#FAF6EE", ...F }}>
       <SiabNav />
@@ -231,22 +245,31 @@ export default function DashboardPage() {
               Dashboard
             </h1>
             <p className="text-sm mt-1" style={{ color: "#9A9080" }}>
-              {PROJECT_ID} · monitoramento de fauna · {periodDisplay}
+              {projectLabel} · monitoramento de fauna · {periodDisplay}
             </p>
           </div>
 
-          {loading && (
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs"
-              style={{ background: "#F5F0E8", color: "#9A9080", ...F }}>
-              <Loader2 size={12} className="animate-spin" /> Carregando dados…
-            </div>
-          )}
-          {error && (
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs"
-              style={{ background: "#FEF2EF", border: "1px solid #F5C7BB", color: "#C2503A", ...F }}>
-              Erro ao carregar: {error}
-            </div>
-          )}
+          <div className="flex items-center gap-2">
+            <ProjectSelector
+              projects={projects}
+              clients={clients}
+              value={projectId}
+              onChange={setProjectId}
+              disabled={loadingProjects && projects.length === 0}
+            />
+            {(loading || loadingProjects) && (
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs"
+                style={{ background: "#F5F0E8", color: "#9A9080", ...F }}>
+                <Loader2 size={12} className="animate-spin" /> Carregando dados…
+              </div>
+            )}
+            {(error || projectsError) && (
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs"
+                style={{ background: "#FEF2EF", border: "1px solid #F5C7BB", color: "#C2503A", ...F }}>
+                Erro ao carregar: {error ?? projectsError}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Summary cards */}
