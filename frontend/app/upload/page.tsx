@@ -8,6 +8,7 @@ import { getSession, useSession } from "next-auth/react";
 import { SiabNav } from "../../src/components/SiabNav";
 import { ProjectSelector } from "../../src/components/ProjectSelector";
 import { CreateProjectForm } from "../../src/components/CreateProjectForm";
+import { GoogleDriveButton } from "../../src/components/GoogleDriveButton";
 import { API_BASE } from "../../src/lib/api";
 import { useProjectsAndClients, clientName } from "../../src/lib/projectTypes";
 
@@ -333,6 +334,10 @@ export default function UploadPage() {
                 <p className="text-xs" style={{ color: "#9A9080" }}>AVI · MP4 · MOV · MKV · múltiplos arquivos aceitos</p>
               </>
             )}
+            <div className="flex items-center gap-2 mt-1">
+              <span className="text-xs" style={{ color: "#9A9080" }}>ou</span>
+            </div>
+            <GoogleDriveButton onFilesReady={addFiles} disabled={running} />
             <input
               ref={inputRef}
               type="file"
