@@ -114,8 +114,13 @@ aws lambda update-function-code --function-name siab-speciesnet --image-uri "${E
 ```
 
 ### Deploy frontend
+⚠ Rodar da **raiz do repositório**, não de dentro de `frontend/` — o Root
+Directory do projeto já está configurado como `frontend` nas settings da
+Vercel, então `cd frontend && vercel --prod` duplica o path
+(`~/frontend/frontend`) e falha com "provided path does not exist"
+(achado 06-07/08/2026).
 ```bash
-cd frontend && vercel --prod
+vercel --prod
 ```
 
 ---
