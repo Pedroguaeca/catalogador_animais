@@ -14,9 +14,10 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
+from boto3.dynamodb.conditions import Attr, Key
 from fastapi.testclient import TestClient
 
-from backend.api import app
+from backend.api import _project_exists, app
 from backend.conftest import DEFAULT_TENANT, make_jwt
 
 TENANT_ID = DEFAULT_TENANT
@@ -35,8 +36,11 @@ def _clients_tbl_mock(items: list[dict] | None = None, get_item: dict | None = N
 
 
 def _projects_tbl_mock(items: list[dict] | None = None) -> MagicMock:
+    # Count sempre coerente com Items (como uma resposta real do DynamoDB
+    # traria) - necessário desde que _project_exists passou a usar
+    # Select="COUNT" (SIAB, correção do bug real do Limit=1).
     m = MagicMock()
-    m.query.return_value    = {"Items": items or []}
+    m.query.return_value    = {"Items": items or [], "Count": len(items or [])}
     m.put_item.return_value = {}
     return m
 
@@ -216,6 +220,91 @@ class TestVideoUploadValidatesProjectExists(unittest.TestCase):
                 json={"filename": "vid.avi", "content_type": "video/x-msvideo"},
             )
         self.assertEqual(resp.status_code, 200)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Regressão do bug real: _project_exists usava Limit=1 junto de
+# FilterExpression. Limit corta quantos itens o DynamoDB AVALIA antes do
+# filtro rodar, não quantos sobrevivem a ele — com Limit=1, só o primeiro
+# item da partição (por ordem de sort key client_id#project_id) era
+# examinado. Achado ao vivo em produção: upload do projeto "Tst"
+# (4731e347...) rejeitado com 422 porque "Teste2" (10badcc5...) vinha antes
+# na ordem de sort key — mesmo "Tst" existindo de verdade.
+#
+# _projects_tbl_mock (MagicMock com .query.return_value fixo) NUNCA teria
+# pego esse bug — ele já devolve os itens "corretos" prontos, sem reproduzir
+# a semântica real de Limit-antes-do-filtro do DynamoDB. Por isso o fake
+# abaixo simula essa semântica de propósito.
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _FakeProjectsTableDynamoSemantics:
+    """Reproduz o comportamento real do DynamoDB Query: se Limit for
+    passado, só os primeiros N itens (na ordem dada ao fake, simulando
+    ordem de sort key) são avaliados — o FilterExpression roda DEPOIS,
+    só sobre esse subconjunto já cortado. Select="COUNT" devolve só a
+    contagem, sem os itens."""
+
+    def __init__(self, items_in_sk_order: list[dict]):
+        self._items = items_in_sk_order
+
+    def query(self, KeyConditionExpression=None, FilterExpression=None, Limit=None, Select=None, **_kwargs):
+        evaluated = self._items[:Limit] if Limit is not None else list(self._items)
+        if FilterExpression is not None:
+            attr_name = FilterExpression._values[0].name
+            target    = FilterExpression._values[1]
+            matched = [it for it in evaluated if it.get(attr_name) == target]
+        else:
+            matched = evaluated
+        if Select == "COUNT":
+            return {"Count": len(matched)}
+        return {"Items": matched, "Count": len(matched)}
+
+
+class TestProjectExistsRegressionAgainstLimitBug(unittest.TestCase):
+
+    def _projects_in_sk_order(self):
+        # Mesma ordem observada ao vivo em produção (client_id#project_id
+        # ascendente): "10badcc5..." vem antes de "4731e347...".
+        return [
+            {"tenant_id": TENANT_ID, "project_id": "10badcc5-8a2d-467e-b04a-d8556e050cba", "nome": "Teste2"},
+            {"tenant_id": TENANT_ID, "project_id": "4731e347-9938-499a-b1b0-25f67823795f", "nome": "Tst"},
+            {"tenant_id": TENANT_ID, "project_id": "7ffab04c-ce2b-4e66-a5f3-09b3aaf0ac11", "nome": "Abras"},
+        ]
+
+    def test_project_first_in_sk_order_is_found(self):
+        tbl = _FakeProjectsTableDynamoSemantics(self._projects_in_sk_order())
+        with patch("backend.api._projects_table", return_value=tbl):
+            self.assertTrue(_project_exists(TENANT_ID, "10badcc5-8a2d-467e-b04a-d8556e050cba"))
+
+    def test_project_second_in_sk_order_is_found(self):
+        # Cenário exato do incidente: "Tst" não é o primeiro da partição -
+        # com Limit=1 isso "não existia" pro upload, mesmo existindo.
+        tbl = _FakeProjectsTableDynamoSemantics(self._projects_in_sk_order())
+        with patch("backend.api._projects_table", return_value=tbl):
+            self.assertTrue(_project_exists(TENANT_ID, "4731e347-9938-499a-b1b0-25f67823795f"))
+
+    def test_project_last_in_sk_order_is_found(self):
+        tbl = _FakeProjectsTableDynamoSemantics(self._projects_in_sk_order())
+        with patch("backend.api._projects_table", return_value=tbl):
+            self.assertTrue(_project_exists(TENANT_ID, "7ffab04c-ce2b-4e66-a5f3-09b3aaf0ac11"))
+
+    def test_genuinely_nonexistent_project_returns_false(self):
+        tbl = _FakeProjectsTableDynamoSemantics(self._projects_in_sk_order())
+        with patch("backend.api._projects_table", return_value=tbl):
+            self.assertFalse(_project_exists(TENANT_ID, "nao-existe-de-verdade"))
+
+    def test_fake_reproduces_old_limit1_bug_if_reintroduced(self):
+        """Prova de que o fake é fiel à semântica real: se alguém reintroduzir
+        Limit=1 nessa query, o item que não é o primeiro da partição some -
+        exatamente o bug original. Não testa _project_exists (já corrigido),
+        só confirma que o fake serve de rede de segurança pra esse padrão."""
+        tbl = _FakeProjectsTableDynamoSemantics(self._projects_in_sk_order())
+        resp = tbl.query(
+            KeyConditionExpression=Key("tenant_id").eq(TENANT_ID),
+            FilterExpression=Attr("project_id").eq("4731e347-9938-499a-b1b0-25f67823795f"),
+            Limit=1,
+        )
+        self.assertEqual(resp["Items"], [])
 
 
 if __name__ == "__main__":

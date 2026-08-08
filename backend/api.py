@@ -146,13 +146,23 @@ def _clients_table():
 def _project_exists(tenant_id: str, project_id: str) -> bool:
     """Checa existência de project_id sem conhecer o client_id (SK de
     siab-projects é client_id#project_id) — Query por tenant_id + filtro
-    pelo atributo project_id solto que create_project também grava."""
+    pelo atributo project_id solto que create_project também grava.
+
+    NÃO usar Limit aqui: Limit corta quantos itens o DynamoDB avalia ANTES
+    de aplicar o FilterExpression, não quantos sobrevivem ao filtro — com
+    Limit=1, só o primeiro item da partição (por ordem de sort key) era
+    checado, então qualquer projeto que não fosse o primeiro da partição do
+    tenant "não existia" pro upload, mesmo existindo de verdade (incidente
+    real, achado ao vivo: upload de "Tst" rejeitado com 422 porque "Teste2"
+    vinha antes na ordem de client_id#project_id). Partição por tenant é
+    pequena (poucas dezenas de projetos no máximo) — Select=COUNT evita
+    trazer os itens completos de volta sem reintroduzir o mesmo bug."""
     resp = _projects_table().query(
         KeyConditionExpression=Key("tenant_id").eq(tenant_id),
         FilterExpression=Attr("project_id").eq(project_id),
-        Limit=1,
+        Select="COUNT",
     )
-    return len(resp.get("Items", [])) > 0
+    return resp.get("Count", 0) > 0
 
 
 def _slugify_species_name(name: str) -> str:

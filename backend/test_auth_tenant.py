@@ -91,9 +91,11 @@ def _videos_tbl_mock(tenant_id: str = TENANT_ID) -> MagicMock:
 
 def _projects_tbl_mock(tenant_id: str = TENANT_ID, project_id: str = "proj-001") -> MagicMock:
     """SIAB-150: generate_upload_url agora valida que project_id existe
-    (_project_exists) antes de gravar o vídeo."""
+    (_project_exists) antes de gravar o vídeo. Count precisa bater com
+    Items - _project_exists usa Select="COUNT" (correção do bug real do
+    Limit=1, ver test_clients_projects.py)."""
     m = MagicMock()
-    m.query.return_value = {"Items": [{"tenant_id": tenant_id, "project_id": project_id}]}
+    m.query.return_value = {"Items": [{"tenant_id": tenant_id, "project_id": project_id}], "Count": 1}
     return m
 
 
